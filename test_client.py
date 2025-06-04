@@ -69,6 +69,16 @@ class MedicalImageAnalysisClient:
         """List all generated reports"""
         response = requests.get(f"{self.base_url}/reports")
         return response.json()
+    
+    def get_model_status(self):
+        """Get current model loading status"""
+        response = requests.get(f"{self.base_url}/model-status")
+        return response.json()
+    
+    def force_reload_model(self):
+        """Force reload the model (useful if loading failed)"""
+        response = requests.post(f"{self.base_url}/load-model")
+        return response.json()
 
 def example_usage():
     """Example usage of the client with both file uploads and URLs"""
@@ -76,6 +86,16 @@ def example_usage():
     
     # Health check
     print("Health check:", client.health_check())
+    
+    # Check model status
+    print("Model status:", client.get_model_status())
+    
+    # If model failed to load, try to reload it
+    status = client.get_model_status()
+    if not status.get('loaded', False) and status.get('error'):
+        print("Model not loaded, attempting to reload...")
+        reload_result = client.force_reload_model()
+        print("Reload result:", reload_result)
     
     # Example with a sample image file (you'll need to provide an actual image path)
     # image_path = "sample_xray.jpg"
