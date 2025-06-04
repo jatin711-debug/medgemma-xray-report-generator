@@ -1,10 +1,15 @@
 import requests
 import json
 from pathlib import Path
+import os
 
 class MedicalImageAnalysisClient:
     def __init__(self, base_url: str = "http://localhost:8000"):
         self.base_url = base_url
+        # Ensure reports directory exists for downloaded files
+        self.reports_dir = "reports"
+        if not os.path.exists(self.reports_dir):
+            os.makedirs(self.reports_dir)
     
     def health_check(self):
         """Check API health"""
@@ -51,7 +56,8 @@ class MedicalImageAnalysisClient:
         
         if response.status_code == 200:
             if not save_path:
-                save_path = f"report_{analysis_id}.pdf"
+                # Save to reports directory instead of root
+                save_path = os.path.join(self.reports_dir, f"downloaded_report_{analysis_id}.pdf")
             
             with open(save_path, 'wb') as f:
                 f.write(response.content)
