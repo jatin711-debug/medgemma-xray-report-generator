@@ -85,10 +85,10 @@ def example_usage():
     client = MedicalImageAnalysisClient()
     
     # Health check
-    print("Health check:", client.health_check())
+    # print("Health check:", client.health_check())
     
     # Check model status
-    print("Model status:", client.get_model_status())
+    # print("Model status:", client.get_model_status())
     
     # If model failed to load, try to reload it
     status = client.get_model_status()
@@ -105,13 +105,13 @@ def example_usage():
     # print("File Analysis result:", json.dumps(analysis, indent=2))
     
     # Example with HTTPS URL (using a medical image URL)
-    sample_xray_url = "https://upload.wikimedia.org/wikipedia/commons/c/c8/Chest_Xray_PA_3-8-2010.png"
+    sample_xray_url = "https://upload.wikimedia.org/wikipedia/commons/5/57/Pneumothorax_CT.jpg"
     
     try:
         # Analyze image from URL
-        print(f"\n--- Analyzing image from URL: {sample_xray_url} ---")
-        url_analysis = client.analyze_image_url(sample_xray_url)
-        print("URL Analysis result:", json.dumps(url_analysis, indent=2))
+        # print(f"\n--- Analyzing image from URL: {sample_xray_url} ---")
+        # url_analysis = client.analyze_image_url(sample_xray_url)
+        # print("URL Analysis result:", json.dumps(url_analysis, indent=2))
         
         # Generate report from URL
         print(f"\n--- Generating report from URL ---")
@@ -119,9 +119,9 @@ def example_usage():
         print("URL Report generated:", url_report)
         
         # Download the report
-        analysis_id = url_report['analysis_id']
-        pdf_path = client.download_report(analysis_id)
-        print(f"Report downloaded to: {pdf_path}")
+        # analysis_id = url_report['analysis_id']
+        # pdf_path = client.download_report(analysis_id)
+        # print(f"Report downloaded to: {pdf_path}")
         
     except Exception as e:
         print(f"Error with URL analysis: {e}")
@@ -133,25 +133,5 @@ def example_usage():
     except Exception as e:
         print(f"Error listing reports: {e}")
 
-def test_various_urls():
-    """Test various image URLs"""
-    client = MedicalImageAnalysisClient()
-    
-    # Test URLs (make sure these are actual medical images)
-    test_urls = [
-        "https://upload.wikimedia.org/wikipedia/commons/c/c8/Chest_Xray_PA_3-8-2010.png",
-        # Add more URLs as needed
-    ]
-    
-    for url in test_urls:
-        try:
-            print(f"\n--- Testing URL: {url} ---")
-            result = client.analyze_image_url(url)
-            print(f"Success! Analysis ID: {result['analysis_id']}")
-            print(f"Findings: {result['findings']['impression'][:100]}...")
-        except Exception as e:
-            print(f"Failed: {e}")
-
 if __name__ == "__main__":
     example_usage()
-    # test_various_urls()  # Uncomment to test multiple URLs
