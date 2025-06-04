@@ -14,3 +14,4 @@ requests
 aiohttp
 validators
 psutil
+triton-windows<3.3
