@@ -1,0 +1,1 @@
+reports/\n__pycache__/\n*.pyc\n*.pyo\n*.pyd\n.Python\nenv/\nvenv/\n.venv/\n.env\n*.log\n.DS_Store\n*.egg-info/\ndist/\nbuild/
