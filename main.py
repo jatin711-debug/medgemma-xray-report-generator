@@ -2,10 +2,11 @@ import os
 import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any, Union
+from contextlib import asynccontextmanager
 import logging
+os.environ['TORCH_COMPILE_DISABLE'] = '1'
 import aiohttp
 import validators
-from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
@@ -191,100 +192,62 @@ class MedicalImageAnalyzer:
     
     async def load_model(self) -> None:
         """
-        Load and initialize the Med-GEMMA-3 pipeline with optimal device configuration.
-        
-        This method handles:
-        - Device detection (CUDA GPU vs CPU)
-        - Memory optimization with appropriate data types
-        - Pipeline initialization with proper error handling
-        - Memory cleanup for existing models
-        - Model validation with dummy inference
-        
-        Raises:
-            HTTPException: If model loading fails, with detailed error information
-            
-        Performance Optimizations:
-        - Uses bfloat16 on GPU for memory efficiency
-        - Implements garbage collection and CUDA cache clearing
-        - Validates model functionality with test inference
-        - Disables torch compilation to avoid Triton errors
+        Load and initialize the Med-GEMMA-3 model with optimal device configuration.
+        This version is simplified to run in eager mode, avoiding torch.compile errors.
         """
         global model_loading_error
         
-        if self.model is not None and not model_loading_error:
-            # Already loaded successfully
+        # 1. Check if model is already loaded and healthy
+        if self.model_loaded and self.model is not None and model_loading_error is None:
+            logger.info("Model is already loaded.")
             return
         
+        # 2. Prevent retrying a load that has already failed
         if model_loading_error is not None:
-            # If it already failed before, raise 503
             raise HTTPException(status_code=503, detail=f"Model loading previously failed: {model_loading_error}")
         
         logger.info(f"Loading Med-GEMMA-3 model ({self.model_id})...")
         logger.info(f"System memory: {self.get_system_memory_info()}")
         
         try:
-            # Clear any existing pipeline for memory optimization
+            # 3. Clean up any previous state before loading
             if self.model is not None:
                 del self.model
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+            if self.processor is not None:
+                del self.processor
+            self.model = None
+            self.processor = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             
-            # Optimize device and data type selection
-            device = 0 if torch.cuda.is_available() else -1
-            torch_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-            
-            # Set environment variable to disable torch compilation before loading
-            os.environ['TORCH_COMPILE_DISABLE'] = '1'
-            
-            # Initialize processor and model separately
+            # 4. Determine optimal device and data type for eager mode
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            torch_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
+            logger.info(f"Attempting to load model on device='{device}' with dtype='{torch_dtype}'")
+
+            # 5. Load the processor and the model with recommended settings
             self.processor = AutoProcessor.from_pretrained(self.model_id)
+            
             self.model = AutoModelForImageTextToText.from_pretrained(
                 self.model_id,
                 torch_dtype=torch_dtype,
-                device_map= "cuda" if torch.cuda.is_available() else "cpu",
-                use_safetensors=True
+                device_map=device,
+                use_safetensors=True,
+                # Use PyTorch's native attention implementation for best eager-mode performance
+                attn_implementation="sdpa" 
             )
-            
-            # Configure the model to use eager execution
-            if hasattr(self.model, 'generation_config'):
-                self.model.generation_config.use_cache = True
             
             self.model_loaded = True
             model_loading_error = None
-            logger.info("Med-GEMMA-3 loaded successfully.")
+            logger.info(f"Med-GEMMA-3 loaded successfully on '{device}' in eager mode.")
             
         except Exception as e:
-            err = str(e)
-            # Check if it's a Triton-related error and provide helpful information
-            if "triton" in err.lower() or "inductor" in err.lower():
-                err = f"PyTorch compilation error (Triton/Inductor backend): {err}. The model will attempt to use eager execution mode."
-                logger.warning(f"Compilation backend failed, this is usually not critical: {err}")
-                # Don't treat compilation errors as fatal, try to continue
-                try:
-                    # Fallback: Force CPU execution if compilation fails
-                    logger.info("Attempting fallback to CPU execution...")
-                    self.model = AutoModelForImageTextToText.from_pretrained(
-                        self.model_id,
-                        torch_dtype=torch.float32,
-                        device_map="cpu",
-                        use_safetensors=True
-                    )
-                    
-                    # Test the fallback
-                    dummy_img = Image.new("RGB", (224, 224), color="white")
-                    _ = self.processor(dummy_img, text="<start_of_image> Test", max_new_tokens=10)
-                    
-                    self.model_loaded = True
-                    model_loading_error = None
-                    logger.info("Med-GEMMA-3 loaded successfully on CPU (fallback mode).")
-                    return
-                    
-                except Exception as fallback_error:
-                    err = f"Both GPU and CPU loading failed. GPU error: {err}. CPU error: {fallback_error}"
-            
-            model_loading_error = f"Failed to load Med-GEMMA-3: {err}"
-            logger.error(model_loading_error)
+            # 6. Catch any exception during loading (OOM, network, etc.)
+            err_msg = f"Failed to load Med-GEMMA-3: {e}"
+            model_loading_error = err_msg
+            # Log the full stack trace for easier debugging
+            logger.error(err_msg, exc_info=True) 
             raise HTTPException(status_code=503, detail=model_loading_error)
     
     def parse_ai_response(self, raw_response: str) -> RadiologyFindings:
