@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 # Global analyzer instance
 analyzer = None
 
+from db import initialize_database
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown events."""
@@ -675,8 +677,8 @@ class MedicalImageAnalyzer:
             if isinstance(e, HTTPException):
                 raise
             raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
-    
-    async def analyze_image_from_url(self, image_url: str) -> AnalysisResponse:
+
+    async def analyze_image_from_url(self, image_url: str, xray_id: str) -> AnalysisResponse:
         """
         Analyze medical image from URL and return complete analysis response.
         
@@ -685,7 +687,8 @@ class MedicalImageAnalyzer:
         
         Args:
             image_url: Valid HTTP/HTTPS URL pointing to a medical image
-            
+            xray_id: Unique identifier for the X-ray image
+
         Returns:
             AnalysisResponse: Complete analysis results with findings and metadata
             
@@ -710,7 +713,12 @@ class MedicalImageAnalyzer:
             # Generate unique analysis ID and timestamp
             analysis_id = str(uuid.uuid4())
             timestamp = datetime.now().isoformat()
+            # Add X-ray ID to metadata
+            image_metadata["xray_id"] = xray_id
             
+            # Store the PDF report path and analysis ID in db
+            await self.store_analysis_result(analysis_id, xray_id, raw_response, findings, image_metadata)
+
             return AnalysisResponse(
                 analysis_id=analysis_id,
                 timestamp=timestamp,
@@ -1118,4 +1126,6 @@ async def force_load_model():
 
 if __name__ == "__main__":
     import uvicorn
+    # Initialize database and model on startup
+    initialize_database()
     uvicorn.run(app, host="0.0.0.0", port=8000)
