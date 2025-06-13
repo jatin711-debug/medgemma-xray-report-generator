@@ -42,7 +42,7 @@ class MedicalImageAnalysisClient:
     
     def analyze_url_and_generate_report(self, image_url: str):
         """Analyze image from URL and generate PDF report"""
-        data = {"image_url": image_url}
+        data = {"image_url": image_url , "image_uuid":"jd8dj3-example-uuid"}
         headers = {"Content-Type": "application/json"}
         response = requests.post(f"{self.base_url}/analyze-url-and-report", json=data, headers=headers)
         if response.status_code != 200:

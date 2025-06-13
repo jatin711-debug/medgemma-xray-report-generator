@@ -50,15 +50,18 @@ def initialize_database() -> None:
 
         # Create the table if it does not exist
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS image_reports (
+            CREATE TABLE IF NOT EXISTS xray_reports (
                 id INT AUTO_INCREMENT PRIMARY KEY,
-                image_uuid VARCHAR(255) NOT NULL,
+                image_uuid VARCHAR(255) NOT NULL UNIQUE ,
                 report_path VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- Timestamp of when the user was created
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP -- Timestamp of the last update
+            );
+            CREATE INDEX idx_image_uuid ON xray_reports (image_uuid);
         """)
         connection.commit()
         cursor.close()
         connection.close()
     except mysql.connector.Error as err:
+        print(f"Error: {err}")
         raise HTTPException(status_code=500, detail="Failed to initialize database")

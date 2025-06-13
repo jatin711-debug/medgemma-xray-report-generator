@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # Global analyzer instance
 analyzer = None
 
-from db import initialize_database
+from db import initialize_database, store_analysis_result
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -81,11 +81,16 @@ class ImageURLReportRequest(BaseModel):
         image_url: HTTP/HTTPS URL of the medical image to analyze and generate report for
     """
     image_url: HttpUrl = Field(description="HTTP/HTTPS URL of the image to analyze and generate report")
+    image_uuid: str = Field(
+        description="Unique identifier for the X-ray image",
+        example="123e4567-e89b-12d3-a456-426614174000"
+    )
     
     model_config = {
         "json_schema_extra": {
             "example": {
-                "image_url": "https://upload.wikimedia.org/wikipedia/commons/c/c8/Chest_Xray_PA_3-8-2010.png"
+                "image_url": "https://upload.wikimedia.org/wikipedia/commons/c/c8/Chest_Xray_PA_3-8-2010.png",
+                "image_uuid": "123e4567-e89b-12d3-a456-426614174000"
             }
         }
     }
@@ -678,7 +683,7 @@ class MedicalImageAnalyzer:
                 raise
             raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
-    async def analyze_image_from_url(self, image_url: str, xray_id: str) -> AnalysisResponse:
+    async def analyze_image_from_url(self, image_url: str) -> AnalysisResponse:
         """
         Analyze medical image from URL and return complete analysis response.
         
@@ -713,11 +718,6 @@ class MedicalImageAnalyzer:
             # Generate unique analysis ID and timestamp
             analysis_id = str(uuid.uuid4())
             timestamp = datetime.now().isoformat()
-            # Add X-ray ID to metadata
-            image_metadata["xray_id"] = xray_id
-            
-            # Store the PDF report path and analysis ID in db
-            await self.store_analysis_result(analysis_id, xray_id, raw_response, findings, image_metadata)
 
             return AnalysisResponse(
                 analysis_id=analysis_id,
@@ -1032,6 +1032,12 @@ async def analyze_url_and_generate_report(
     pdf_path = await run_in_threadpool(
         analyzer.generate_pdf_report, 
         analysis_response
+    )
+    
+    # Store the PDF report path and analysis ID in db
+    await store_analysis_result(
+        image_uuid=request.image_uuid,
+        reportPath=pdf_path
     )
     
     return PDFGenerationResponse(
