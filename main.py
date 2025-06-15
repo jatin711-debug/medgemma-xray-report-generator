@@ -840,9 +840,10 @@ class MedicalImageAnalyzer:
                 raise
             raise HTTPException(status_code=500, detail=f"Failed to fetch image: {str(e)}")
 
-
 # Initialize analyzer
 analyzer = MedicalImageAnalyzer()
+# Initialize database
+initialize_database()
 
 
 @app.get("/")
@@ -1132,6 +1133,4 @@ async def force_load_model():
 
 if __name__ == "__main__":
     import uvicorn
-    # Initialize database and model on startup
-    initialize_database()
     uvicorn.run(app, host="0.0.0.0", port=8000)

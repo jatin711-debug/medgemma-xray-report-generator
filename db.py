@@ -1,10 +1,10 @@
-from http.client import HTTPException
+from fastapi import HTTPException # Changed from http.client
 import mysql.connector
 from dotenv import load_dotenv
 import os
 load_dotenv(dotenv_path=".env")
 
-def store_analysis_result(image_uuid: str, reportPath: str) -> None:
+async def store_analysis_result(image_uuid: str, reportPath: str) -> None:
     """
     Store the analysis result in the MySQL database.
 
@@ -15,23 +15,28 @@ def store_analysis_result(image_uuid: str, reportPath: str) -> None:
     try:
         # Connect to the MySQL database
         connection = mysql.connector.connect(
-            host="your_mysql_host",
-            user="your_mysql_user",
-            password="your_mysql_password",
-            database="your_database_name",
-            port=3306  # Default MySQL port, change if necessary
+            host=os.getenv('MYSQL_HOST'),
+            user=os.getenv('MYSQL_USER'),
+            password=os.getenv('MYSQL_PASSWORD'),
+            database=os.getenv('MYSQL_DATABASE'),
+            port=int(os.getenv('MYSQL_PORT', 3306))  # Default MySQL port, change if necessary
         )
         cursor = connection.cursor()
 
         # Insert the data into the table
-        query = "INSERT INTO image_reports (image_uuid, report_path) VALUES (%s, %s)"
+        query = "INSERT INTO xray_reports (image_uuid, report_path) VALUES (%s, %s)"
         cursor.execute(query, (image_uuid, reportPath))
         # Commit the transaction
         connection.commit()
         cursor.close()
         connection.close()
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail="Failed to store analysis result in database")
+        print(f"MySQL Error: {err}")
+        # Use FastAPI's HTTPException
+        raise HTTPException(status_code=500, detail=f"Failed to store analysis result: {err}")
+    except Exception as e:
+        print(f"General Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to store analysis result: {e}")
     
 def initialize_database() -> None:
     """
@@ -57,11 +62,26 @@ def initialize_database() -> None:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- Timestamp of when the user was created
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP -- Timestamp of the last update
             );
-            CREATE INDEX idx_image_uuid ON xray_reports (image_uuid);
         """)
-        connection.commit()
+        # Create the index separately and handle if it already exists
+        try:
+            cursor.execute("""
+                CREATE INDEX idx_image_uuid ON xray_reports (image_uuid);
+            """)
+        except mysql.connector.Error as err:
+            if err.errno == 1061:  # ER_DUP_KEYNAME (Duplicate key name)
+                print(f"Info: Index 'idx_image_uuid' already exists on table 'xray_reports'.")
+            else:
+                raise # Re-raise other MySQL errors
+        
+        # It's good practice to close the cursor before committing if no more operations are needed with it.
         cursor.close()
+        connection.commit()
         connection.close()
     except mysql.connector.Error as err:
-        print(f"Error: {err}")
-        raise HTTPException(status_code=500, detail="Failed to initialize database")
+        print(f"MySQL Error during database initialization: {err}")
+        # Use FastAPI's HTTPException
+        raise HTTPException(status_code=500, detail=f"Failed to initialize database: {err}")
+    except Exception as e:
+        print(f"General Error during database initialization: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to initialize database: {e}")
