@@ -1039,7 +1039,7 @@ async def analyze_url_and_generate_report(
     )
     
     # Define S3 bucket details (replace with your actual configuration)
-    s3_bucket_name = os.getenv("S3_BUCKET_NAME", "your-s3-bucket-name")
+    s3_bucket_name = os.getenv("AWS_S3_BUCKET_NAME", "your-s3-bucket-name")
     s3_region = os.getenv("AWS_REGION", "your-aws-region")
     # Create a unique S3 key, e.g., using the analysis ID
     s3_key = f"reports/{analysis_response.analysis_id}/{os.path.basename(local_pdf_path)}"
