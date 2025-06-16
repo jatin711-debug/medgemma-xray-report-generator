@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 analyzer = None
 
 from db import initialize_database, store_analysis_result
+from aws_utils import upload_to_s3 # Import the new S3 upload function
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1012,14 +1013,14 @@ async def analyze_url_and_generate_report(
     """
     Analyze medical image from URL and generate comprehensive PDF report.
     
-    Combines secure image downloading, AI analysis, and professional PDF
-    report generation in a single optimized endpoint.
+    Combines secure image downloading, AI analysis, professional PDF
+    report generation, S3 upload, and database logging.
     
     Args:
         request: ImageURLReportRequest containing the image URL
         
     Returns:
-        PDFGenerationResponse: PDF file path and analysis identifier
+        PDFGenerationResponse: PDF file S3 path and analysis identifier
         
     Performance Optimization:
         - Uses thread pool for CPU-intensive PDF generation
@@ -1030,19 +1031,40 @@ async def analyze_url_and_generate_report(
     analysis_response = await analyzer.analyze_image_from_url(str(request.image_url))
     
     # Generate PDF in thread pool to avoid blocking the event loop
-    pdf_path = await run_in_threadpool(
+    local_pdf_path = await run_in_threadpool(
         analyzer.generate_pdf_report, 
         analysis_response
     )
     
-    # Store the PDF report path and analysis ID in db
+    # Define S3 bucket details (replace with your actual configuration)
+    s3_bucket_name = os.getenv("S3_BUCKET_NAME", "your-s3-bucket-name")
+    s3_region = os.getenv("AWS_REGION", "your-aws-region")
+    # Create a unique S3 key, e.g., using the analysis ID
+    s3_key = f"reports/{analysis_response.analysis_id}/{os.path.basename(local_pdf_path)}"
+    
+    s3_pdf_url = "" # Initialize to empty string
+    try:
+        # Upload the PDF to S3
+        s3_pdf_url = await upload_to_s3(
+            local_file_path=local_pdf_path,
+            bucket_name=s3_bucket_name,
+            s3_key=s3_key,
+            region_name=s3_region
+        )
+        logger.info(f"Successfully uploaded PDF to S3: {s3_pdf_url}")
+    except Exception as e:
+        logger.error(f"Failed to upload PDF to S3: {e}", exc_info=True)
+
+    path_to_store = s3_key
+    
     await store_analysis_result(
-        image_uuid=request.image_uuid,
-        reportPath=pdf_path
+        image_uuid=request.image_uuid, # Ensure ImageURLReportRequest has image_uuid
+        reportPath=path_to_store,
+        analysis_id=analysis_response.analysis_id # Pass analysis_id if your DB schema needs it
     )
     
     return PDFGenerationResponse(
-        pdf_path=pdf_path,
+        pdf_path=path_to_store, # Return S3 URL or local path
         analysis_id=analysis_response.analysis_id
     )
 

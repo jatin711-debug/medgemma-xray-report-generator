@@ -16,3 +16,4 @@ validators
 psutil
 triton-windows<3.3
 mysql-connector-python
+boto3
