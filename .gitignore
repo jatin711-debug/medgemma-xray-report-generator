@@ -124,4 +124,3 @@ celerybeat.pid
 coverage/
 *.pdf
 /reports
-.env
