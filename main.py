@@ -7,6 +7,8 @@ import logging
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
 import aiohttp
 import validators
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=".env")  # Load environment variables from .env file
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
@@ -21,7 +23,7 @@ from reportlab.platypus import (
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+from reportlab.lib.enums import TA_CENTER
 import gc
 
 import torch
@@ -1059,8 +1061,7 @@ async def analyze_url_and_generate_report(
     
     await store_analysis_result(
         image_uuid=request.image_uuid, # Ensure ImageURLReportRequest has image_uuid
-        reportPath=path_to_store,
-        analysis_id=analysis_response.analysis_id # Pass analysis_id if your DB schema needs it
+        reportPath=path_to_store
     )
     
     return PDFGenerationResponse(
