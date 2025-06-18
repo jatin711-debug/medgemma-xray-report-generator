@@ -1,5 +1,7 @@
 from builtins import str
 import os
+import cv2
+import numpy as np
 import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any, Union
@@ -19,7 +21,7 @@ from PIL import Image
 import io
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, Image as RLImage, Flowable
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, Image as ReportLabImage
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
@@ -305,7 +307,7 @@ class MedicalImageAnalyzer:
                 confidence_level="Not available"
             )
     
-    async def analyze_image(self, image: Image.Image) -> tuple[str, RadiologyFindings]:
+    async def analyze_image(self, image: Image.Image) -> tuple[str, RadiologyFindings, Image.Image]:
         """
         Perform AI-powered medical image analysis using Med-GEMMA-3.
         
@@ -316,9 +318,10 @@ class MedicalImageAnalyzer:
             image: PIL Image object in RGB format
             
         Returns:
-            tuple: (raw_response, structured_findings)
+            tuple: (raw_response, structured_findings, heatmap_image)
             - raw_response: Original AI model output text
             - structured_findings: Parsed RadiologyFindings object
+            - heatmap_image: PIL Image of the generated heatmap overlay
             
         Raises:
             HTTPException: If analysis fails or model is not loaded
@@ -326,8 +329,9 @@ class MedicalImageAnalyzer:
         Process:
         1. Ensure model is loaded and ready
         2. Prepare clinical analysis prompt using chat template
-        3. Execute AI inference with proper tokenization
-        4. Parse and structure the response
+        3. Execute AI inference with proper tokenization and attention capture
+        4. Generate a heatmap from the model's attention
+        5. Parse and structure the response
         """
         await self.load_model()
         
@@ -360,36 +364,86 @@ class MedicalImageAnalyzer:
             
             # Execute AI inference with torch.inference_mode for efficiency
             with torch.inference_mode():
-                generation = self.model.generate(
+                generation_output = self.model.generate(
                     **inputs, 
                     max_new_tokens=512, 
                     do_sample=False,
-                    use_cache=True
+                    use_cache=True,
+                    output_attentions=True,
+                    return_dict_in_generate=True
                 )
-                generation = generation[0][input_len:]
+                generation = generation_output.sequences[0][input_len:]
+                cross_attentions = generation_output.cross_attentions
             
             # Decode the generated response
             raw_response = self.processor.decode(generation, skip_special_tokens=True)
             
+            # Generate heatmap from attention weights
+            heatmap_image = self._generate_heatmap(cross_attentions, image)
+            
             # Parse response into structured findings
             findings = self.parse_ai_response(raw_response)
             
-            return raw_response, findings
+            return raw_response, findings, heatmap_image
         
         except Exception as e:
-            logger.error(f"Error during image analysis: {str(e)}")
+            logger.error(f"Error during image analysis: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
-    def generate_pdf_report(self, analysis_response: AnalysisResponse) -> str:
+    def _generate_heatmap(self, attentions: tuple, original_image: Image.Image) -> Image.Image:
+        """
+        Generates a heatmap from the model's cross-attentions and overlays it on the original image.
+        """
+        if not attentions:
+            logger.warning("Attention weights not found, cannot generate heatmap.")
+            return original_image
+
+        try:
+            # Aggregate attentions across all generated tokens
+            # Shape of each tensor in attentions tuple: (batch_size, num_heads, 1, num_patches)
+            stacked_attentions = torch.stack([att_tensor for att_tensor in attentions]).squeeze(2)
+            # Now shape is (num_tokens, batch_size, num_heads, num_patches)
+            
+            # Average across tokens, heads, and batch
+            avg_attention = stacked_attentions.mean(dim=[0, 1, 2]) # Shape: (num_patches)
+            
+            # Reshape to a 2D grid
+            num_patches = avg_attention.shape[0]
+            grid_size = int(np.sqrt(num_patches))
+            if grid_size * grid_size != num_patches:
+                logger.warning(f"Cannot form a square grid from {num_patches} patches. Skipping heatmap.")
+                return original_image
+
+            attention_grid = avg_attention.cpu().numpy().reshape(grid_size, grid_size)
+            
+            # Resize to original image dimensions and apply colormap
+            heatmap = cv2.resize(attention_grid, original_image.size)
+            heatmap = (heatmap - np.min(heatmap)) / (np.max(heatmap) - np.min(heatmap) + 1e-8)
+            heatmap = np.uint8(255 * heatmap)
+            heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+
+            # Blend with original image
+            original_bgr = cv2.cvtColor(np.array(original_image.convert('RGB')), cv2.COLOR_RGB2BGR)
+            superimposed_img = cv2.addWeighted(original_bgr, 0.6, heatmap_color, 0.4, 0)
+            superimposed_rgb = cv2.cvtColor(superimposed_img, cv2.COLOR_BGR2RGB)
+            
+            return Image.fromarray(superimposed_rgb)
+        except Exception as e:
+            logger.error(f"Failed to generate heatmap: {e}", exc_info=True)
+            return original_image # Return original image on failure
+
+    def generate_pdf_report(self, analysis_response: AnalysisResponse, original_image: Image.Image, heatmap_image: Image.Image) -> str:
         """
         Generate a comprehensive, professionally designed PDF medical report.
 
         This function creates a modern, visually appealing report similar to those
         from major tech companies, with a clear structure, branding, and high readability.
-        It now includes the source URL as a clickable link if applicable.
+        It now includes a second page for visual comparison of the original image and AI heatmap.
 
         Args:
             analysis_response: The complete analysis result object.
+            original_image: The original PIL image.
+            heatmap_image: The generated PIL image with heatmap overlay.
 
         Returns:
             The file path to the generated PDF report.
@@ -452,28 +506,26 @@ class MedicalImageAnalyzer:
             styles.add(ParagraphStyle(name='LinkStyle', parent=styles['Normal'], fontSize=10, textColor=link_color))
 
 
-            # --- 1. Cover Page ---
-            story.append(Spacer(1, 1 * inch))
+            # --- 1. Single-Page Report ---
+            story.append(Spacer(1, 0.5 * inch))
             story.append(Paragraph("Pneumothorax Detection Report", styles['CoverTitle']))
             story.append(Paragraph("AI-Powered Analysis with Med-GEMMA-3", styles['CustomSubtitle']))
-            story.append(Spacer(1, 0.5 * inch))
+            story.append(Spacer(1, 0.2 * inch))
             story.append(Paragraph(f"<b>Analysis ID:</b> {analysis_response.analysis_id}", styles['MetaInfo']))
             story.append(Paragraph(f"<b>Generated:</b> {analysis_response.timestamp}", styles['MetaInfo']))
-            story.append(Spacer(1, 1 * inch))
+            story.append(Spacer(1, 0.3 * inch))
             summary_text = (
                 f"<b>Finding:</b> {analysis_response.findings.impression}<br/><br/>"
                 f"<b>Confidence:</b> {analysis_response.findings.confidence_level}"
             )
             story.append(Paragraph(summary_text, styles['SummaryBox']))
-            story.append(PageBreak())
+            story.append(Spacer(1, 0.2 * inch))
 
-
-            # --- 2. Report Details ---
+            # --- Report Details ---
             story.append(Paragraph("Analysis Details", styles['SectionTitle']))
             metadata = analysis_response.image_metadata
             source_type = metadata.get("source")
             source_row = []
-
             if source_type == 'url':
                 image_url = metadata.get('url', 'N/A')
                 display_url = (image_url[:70] + '...') if len(image_url) > 70 else image_url
@@ -483,7 +535,6 @@ class MedicalImageAnalyzer:
                 source_row = ['Uploaded File', metadata.get('filename', 'N/A')]
             else:
                 source_row = ['Image Source', 'Unknown']
-
             meta_data = [
                 ['Analysis ID', analysis_response.analysis_id],
                 ['Timestamp', analysis_response.timestamp],
@@ -507,19 +558,17 @@ class MedicalImageAnalyzer:
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#DADCE0")),
             ]))
             story.append(meta_table)
-            story.append(Spacer(1, 0.3 * inch))
+            story.append(Spacer(1, 0.2 * inch))
 
-            story.append(PageBreak())
-
-            # --- 3. Detailed AI Analysis (Raw Output) ---
+            # --- Detailed AI Analysis (Raw Output) ---
             story.append(Paragraph("Detailed AI Analysis", styles['SectionTitle']))
             story.append(Paragraph("The following is the raw, unformatted text generated by the AI model.", styles['Normal']))
             story.append(Spacer(1, 0.1 * inch))
             raw_text_formatted = analysis_response.raw_response.replace('\n', '<br/>')
             story.append(Paragraph(raw_text_formatted, styles['AIAnalysis']))
-            story.append(Spacer(1, 0.3 * inch))
+            story.append(Spacer(1, 0.2 * inch))
 
-            # --- 4. Disclaimer ---
+            # --- Disclaimer ---
             story.append(Paragraph("Disclaimer", styles['SectionTitle']))
             disclaimer_text = (
                 "This report was generated by an AI model (Med-GEMMA-3) and is intended for informational "
@@ -529,6 +578,50 @@ class MedicalImageAnalyzer:
                 "clinical history and other diagnostic results."
             )
             story.append(Paragraph(disclaimer_text, styles['CustomDisclaimer']))
+
+            # --- PAGE BREAK FOR VISUAL ANALYSIS ---
+            story.append(PageBreak())
+
+            # --- 2. Second Page - Visual Comparison ---
+            story.append(Paragraph("Visual Analysis: AI Focus Map", styles['SectionTitle']))
+            story.append(Paragraph(
+                "The following images provide a side-by-side comparison of the original medical scan "
+                "and a heatmap visualizing the areas the AI model focused on for its analysis. "
+                "The brighter, warmer areas (red, yellow) indicate a higher level of AI attention.",
+                styles['Normal']
+            ))
+            story.append(Spacer(1, 0.2 * inch))
+
+            # Convert PIL images to reportlab Image flowables by saving to a memory buffer
+            
+            original_img_buffer = io.BytesIO()
+            original_image.save(original_img_buffer, format='PNG')
+            original_img_buffer.seek(0)
+            rl_original_image = ReportLabImage(original_img_buffer, width=3*inch, height=3*inch, kind='proportional')
+            
+            heatmap_img_buffer = io.BytesIO()
+            heatmap_image.save(heatmap_img_buffer, format='PNG')
+            heatmap_img_buffer.seek(0)
+            rl_heatmap_image = ReportLabImage(heatmap_img_buffer, width=3*inch, height=3*inch, kind='proportional')
+
+            # Create a table for side-by-side comparison
+            image_comparison_data = [
+                [Paragraph("<b>Original Image</b>", styles['Normal']), Paragraph("<b>AI Heatmap</b>", styles['Normal'])],
+                [rl_original_image, rl_heatmap_image]
+            ]
+            
+            image_table = Table(image_comparison_data, colWidths=[3.2*inch, 3.2*inch])
+            image_table.setStyle(TableStyle([
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('FONTNAME', (0, 0), (0, 0), 'Helvetica-Bold'),
+                ('FONTNAME', (1, 0), (1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('TOPPADDING', (0, 1), (-1, 1), 6),
+            ]))
+            
+            story.append(image_table)
+
 
             # --- Footer with Page Numbers ---
             def add_footer(canvas, doc):
@@ -541,7 +634,7 @@ class MedicalImageAnalyzer:
                 canvas.drawRightString(doc.width + 30, 25, page_num_text)
                 canvas.restoreState()
 
-            # Build the PDF
+            # Build the PDF (now multi-page)
             doc.build(story, onFirstPage=add_footer, onLaterPages=add_footer)
             logger.info(f"Professionally styled PDF report generated: {filepath}")
             return filepath
@@ -598,19 +691,24 @@ class MedicalImageAnalyzer:
             }
             
             # Perform AI analysis
-            raw_response, findings = await self.analyze_image(image)
+            raw_response, findings, heatmap_image = await self.analyze_image(image)
             
             # Generate unique analysis ID and timestamp
             analysis_id = str(uuid.uuid4())
             timestamp = datetime.now().isoformat()
             
-            return AnalysisResponse(
+            analysis_response = AnalysisResponse(
                 analysis_id=analysis_id,
                 timestamp=timestamp,
                 findings=findings,
                 raw_response=raw_response,
                 image_metadata=image_metadata
             )
+            
+            # Generate and save the PDF report with the images
+            self.generate_pdf_report(analysis_response, image, heatmap_image)
+            
+            return analysis_response
             
         except Exception as e:
             logger.error(f"Error analyzing uploaded image: {str(e)}")
@@ -648,13 +746,19 @@ class MedicalImageAnalyzer:
             image, image_metadata = await self.fetch_image_from_url(image_url)
             
             # Perform AI analysis
-            raw_response, findings = await self.analyze_image(image)
+            raw_response, findings, heatmap_image = await self.analyze_image(image)
             
             # Generate unique analysis ID and timestamp
             analysis_id = str(uuid.uuid4())
             timestamp = datetime.now().isoformat()
-
-            return AnalysisResponse(
+            
+            # Update metadata with URL source info
+            image_metadata.update({
+                "source": "url",
+                "url": image_url
+            })
+            
+            analysis_response = AnalysisResponse(
                 analysis_id=analysis_id,
                 timestamp=timestamp,
                 findings=findings,
@@ -662,10 +766,15 @@ class MedicalImageAnalyzer:
                 image_metadata=image_metadata
             )
             
+            # Generate and save the PDF report with the images
+            self.generate_pdf_report(analysis_response, image, heatmap_image)
+            
+            return analysis_response
+            
         except Exception as e:
             logger.error(f"Error analyzing image from URL: {str(e)}")
             if isinstance(e, HTTPException):
-                raise
+                raise e
             raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
     async def fetch_image_from_url(self, image_url: str) -> tuple[Image.Image, Dict[str, Any]]:
