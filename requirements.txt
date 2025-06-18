@@ -16,5 +16,5 @@ validators
 psutil
 mysql-connector-python
 boto3
-python-opencv
+opencv-python
 numpy
