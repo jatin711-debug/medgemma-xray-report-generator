@@ -3,6 +3,7 @@ import os
 import cv2
 import numpy as np
 import uuid
+import re
 import io
 import gc
 from datetime import datetime
@@ -273,12 +274,10 @@ class MedicalImageAnalyzer:
         
         Args:
             raw_response: Raw text output from the Med-GEMMA-3 model
-            
-        Returns:
+              Returns:
             RadiologyFindings: Structured medical findings for pneumothorax.
         """
         try:
-            import re
             # Use regex to find confidence percentage
             confidence_match = re.search(r'(\d+\.?\d*)\s?%', raw_response)
             confidence = f"{confidence_match.group(1)}%" if confidence_match else "N/A"
@@ -720,9 +719,9 @@ class MedicalImageAnalyzer:
             logger.error(f"Error generating professional PDF: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
         
-    async def analyze_image_from_upload(self, file: UploadFile) -> AnalysisResponse:
+    async def analyze_image_from_upload(self, file: UploadFile) -> tuple[AnalysisResponse, Image.Image, Image.Image]:
         """
-        Analyze medical image from uploaded file and return complete analysis response.
+        Analyze medical image from uploaded file and return complete analysis response with images.
         
         Processes uploaded image files through the complete analysis pipeline,
         including validation, preprocessing, AI analysis, and metadata collection.
@@ -731,7 +730,10 @@ class MedicalImageAnalyzer:
             file: FastAPI UploadFile containing the medical image
             
         Returns:
-            AnalysisResponse: Complete analysis results with findings and metadata
+            tuple: (AnalysisResponse, original_image, heatmap_image)
+            - AnalysisResponse: Complete analysis results with findings and metadata
+            - original_image: Original PIL Image in RGB format
+            - heatmap_image: Generated heatmap overlay image
             
         Raises:
             HTTPException: If file processing or analysis fails
@@ -740,7 +742,7 @@ class MedicalImageAnalyzer:
         1. File validation and size checking
         2. Image preprocessing and format conversion
         3. Metadata extraction
-        4. AI-powered analysis
+        4. AI-powered analysis with heatmap generation
         5. Response structuring with unique ID
         """
         try:
@@ -782,30 +784,28 @@ class MedicalImageAnalyzer:
                 image_metadata=image_metadata
             )
             
-            # Generate and save the PDF report with the images
-            self.generate_pdf_report(analysis_response, image, heatmap_image)
-            
-            return analysis_response
+            return analysis_response, image, heatmap_image
             
         except Exception as e:
             logger.error(f"Error analyzing uploaded image: {str(e)}")
-            if isinstance(e, HTTPException):
-                raise
+            if isinstance(e, HTTPException):            raise
             raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
-    async def analyze_image_from_url(self, image_url: str) -> AnalysisResponse:
+    async def analyze_image_from_url(self, image_url: str) -> tuple[AnalysisResponse, Image.Image, Image.Image]:
         """
-        Analyze medical image from URL and return complete analysis response.
+        Analyze medical image from URL and return complete analysis response with images.
         
         Downloads and analyzes medical images from HTTP/HTTPS URLs with comprehensive
         validation, security checks, and metadata collection.
         
         Args:
             image_url: Valid HTTP/HTTPS URL pointing to a medical image
-            xray_id: Unique identifier for the X-ray image
 
         Returns:
-            AnalysisResponse: Complete analysis results with findings and metadata
+            tuple: (AnalysisResponse, original_image, heatmap_image)
+            - AnalysisResponse: Complete analysis results with findings and metadata
+            - original_image: Original PIL Image in RGB format
+            - heatmap_image: Generated heatmap overlay image
             
         Raises:
             HTTPException: If URL fetch or analysis fails
@@ -843,10 +843,7 @@ class MedicalImageAnalyzer:
                 image_metadata=image_metadata
             )
             
-            # Generate and save the PDF report with the images
-            self.generate_pdf_report(analysis_response, image, heatmap_image)
-            
-            return analysis_response
+            return analysis_response, image, heatmap_image
             
         except Exception as e:
             logger.error(f"Error analyzing image from URL: {str(e)}")
@@ -1006,7 +1003,8 @@ async def analyze_medical_image(file: UploadFile = File(...)):
     if not file.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="File must be an image")
     
-    return await analyzer.analyze_image_from_upload(file)
+    analysis_response, _, _ = await analyzer.analyze_image_from_upload(file)
+    return analysis_response
 
 
 @app.post("/analyze-and-report", response_model=PDFGenerationResponse)
@@ -1029,14 +1027,20 @@ async def analyze_and_generate_report(
         - Uses thread pool for CPU-intensive PDF generation
         - Non-blocking async execution
         - Memory-efficient processing
+        - Single AI inference run (no duplicate processing)
     """
-    # Perform analysis first
-    analysis_response = await analyzer.analyze_image_from_upload(file)
+    if not file.content_type.startswith('image/'):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    
+    # Perform analysis once - this includes heatmap generation
+    analysis_response, original_image, heatmap_image = await analyzer.analyze_image_from_upload(file)
     
     # Generate PDF in thread pool to avoid blocking the event loop
     pdf_path = await run_in_threadpool(
         analyzer.generate_pdf_report, 
-        analysis_response
+        analysis_response,
+        original_image,
+        heatmap_image
     )
     
     return PDFGenerationResponse(
@@ -1123,7 +1127,8 @@ async def analyze_image_url(request: ImageURLRequest):
         - Timeout protection
         - Protocol validation (HTTP/HTTPS only)
     """
-    return await analyzer.analyze_image_from_url(str(request.image_url))
+    analysis_response, _, _ = await analyzer.analyze_image_from_url(str(request.image_url))
+    return analysis_response
 
 
 @app.post("/analyze-url-and-report", response_model=PDFGenerationResponse)
@@ -1146,14 +1151,17 @@ async def analyze_url_and_generate_report(
         - Uses thread pool for CPU-intensive PDF generation
         - Efficient async image downloading
         - Memory-conscious processing pipeline
+        - Single AI inference run (no duplicate processing)
     """
-    # Perform analysis first
-    analysis_response = await analyzer.analyze_image_from_url(str(request.image_url))
+    # Perform analysis once - this includes heatmap generation
+    analysis_response, original_image, heatmap_image = await analyzer.analyze_image_from_url(str(request.image_url))
     
     # Generate PDF in thread pool to avoid blocking the event loop
     local_pdf_path = await run_in_threadpool(
         analyzer.generate_pdf_report, 
-        analysis_response
+        analysis_response,
+        original_image,
+        heatmap_image
     )
     
     # Define S3 bucket details (replace with your actual configuration)
@@ -1162,7 +1170,7 @@ async def analyze_url_and_generate_report(
     # Create a unique S3 key, e.g., using the analysis ID
     s3_key = f"reports/{analysis_response.analysis_id}/{os.path.basename(local_pdf_path)}"
     
-    s3_pdf_url = "" # Initialize to empty string
+    s3_pdf_url = ""  # Initialize to empty string
     try:
         # Upload the PDF to S3
         s3_pdf_url = await upload_to_s3(
@@ -1178,12 +1186,12 @@ async def analyze_url_and_generate_report(
     path_to_store = s3_key
     
     await store_analysis_result(
-        image_uuid=request.image_uuid, # Ensure ImageURLReportRequest has image_uuid
+        image_uuid=request.image_uuid,  # Ensure ImageURLReportRequest has image_uuid
         reportPath=path_to_store
     )
     
     return PDFGenerationResponse(
-        pdf_path=path_to_store, # Return S3 URL or local path
+        pdf_path=path_to_store,  # Return S3 URL or local path
         analysis_id=analysis_response.analysis_id
     )
 
