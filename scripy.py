@@ -233,13 +233,23 @@ class MedicalImageAnalyzer:
         self.perf_logger = logging.getLogger(f"{__name__}.performance")
         self.security_logger = logging.getLogger(f"{__name__}.security")
     
-    def _validate_image(self, image: Image.Image) -> None:
-        """Comprehensive image validation for security and compatibility."""
-        # Check format
-        if image.format not in self.allowed_image_formats:
+    def _validate_image(self, image: Image.Image, metadata: dict = None) -> None:
+        """Comprehensive image validation for security and compatibility. Accepts optional metadata for format fallback."""
+        # Try to get format from image or metadata
+        img_format = image.format
+        if not img_format and metadata and 'format' in metadata:
+            img_format = metadata['format']
+        if not img_format and metadata and 'filename' in metadata:
+            ext = os.path.splitext(metadata['filename'])[1].lower()
+            ext_map = {'.jpg': 'JPEG', '.jpeg': 'JPEG', '.png': 'PNG', '.tiff': 'TIFF', '.bmp': 'BMP', '.webp': 'WEBP'}
+            img_format = ext_map.get(ext)
+        if not img_format:
+            # Fallback: assume PNG if image loads successfully
+            img_format = 'PNG'
+        if img_format.upper() not in self.allowed_image_formats:
             raise HTTPException(
                 status_code=400, 
-                detail=f"Unsupported image format: {image.format}. Allowed: {self.allowed_image_formats}"
+                detail=f"Unsupported image format: {img_format}. Allowed: {self.allowed_image_formats}"
             )
         
         # Check dimensions
@@ -518,7 +528,7 @@ class MedicalImageAnalyzer:
                     # Process image with validation
                     try:
                         image = Image.open(io.BytesIO(content)).convert('RGB')
-                        self._validate_image(image)
+                        self._validate_image(image, metadata={"format": image.format, "filename": os.path.basename(image_url)})
                     except Exception as e:
                         raise HTTPException(status_code=400, detail=f"Invalid or corrupted image: {e}")
                     
