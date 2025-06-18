@@ -501,37 +501,38 @@ class MedicalImageAnalyzer:
                 async with session.get(image_url) as response:
                     # Validate response status
                     if response.status != 200:
+                        logger.error(f"Image fetch failed: HTTP {response.status} for {image_url}")
                         raise HTTPException(
                             status_code=400, 
                             detail=f"Failed to fetch image: HTTP {response.status}"
                         )
-                    
                     # Validate content type
                     content_type = response.headers.get('content-type', '').lower()
+                    logger.info(f"Fetched content-type: {content_type} from {image_url}")
                     if not content_type.startswith('image/'):
+                        logger.error(f"Invalid content type: {content_type} for {image_url}")
                         raise HTTPException(
                             status_code=400, 
                             detail=f"Invalid content type: {content_type}. Expected image/*"
                         )
-                    
                     # Read content with size validation
                     content = await response.read()
+                    logger.info(f"Fetched {len(content)} bytes from {image_url}")
                     if len(content) > self.max_image_size:
                         raise HTTPException(
                             status_code=413, 
                             detail=f"Image size ({len(content)} bytes) exceeds limit ({self.max_image_size} bytes)"
                         )
-                    
-                    if len(content) < 1024:  # Minimum reasonable image size
+                    if len(content) < 1024:
+                        logger.error(f"Image file too small or empty from {image_url}")
                         raise HTTPException(status_code=400, detail="Image file appears to be too small or corrupted")
-                    
                     # Process image with validation
                     try:
                         image = Image.open(io.BytesIO(content)).convert('RGB')
                         self._validate_image(image, metadata={"format": image.format, "filename": os.path.basename(image_url)})
                     except Exception as e:
+                        logger.error(f"Image open/validation failed for {image_url}: {e}")
                         raise HTTPException(status_code=400, detail=f"Invalid or corrupted image: {e}")
-                    
                     # Gather metadata
                     metadata = {
                         "source": "url",
@@ -542,11 +543,8 @@ class MedicalImageAnalyzer:
                         "content_type": content_type,
                         "fetch_duration": (datetime.now() - start_time).total_seconds()
                     }
-                    
-                    # Log successful fetch
                     logger.info(f"Successfully fetched image from URL: {image_url[:100]}...")
                     return image, metadata
-                    
             except aiohttp.ClientError as e:
                 self.security_logger.warning(f"Network error fetching image from {image_url}: {e}")
                 raise HTTPException(status_code=500, detail=f"Network error: {e}")
