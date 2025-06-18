@@ -262,83 +262,36 @@ class MedicalImageAnalyzer:
     
     def parse_ai_response(self, raw_response: str) -> RadiologyFindings:
         """
-        Parse raw AI model output into structured radiology findings.
+        Parse raw AI model output for pneumothorax detection.
         
-        This method intelligently extracts and categorizes medical information from
-        the AI model's natural language response into standardized clinical sections.
+        This method intelligently extracts the finding and confidence level for pneumothorax.
         
         Args:
             raw_response: Raw text output from the Med-GEMMA-3 model
             
         Returns:
-            RadiologyFindings: Structured medical findings with categorized information
-            
-        Processing Steps:
-        1. Text preprocessing and line extraction
-        2. Section identification using medical keywords
-        3. Content categorization into clinical sections
-        4. Confidence level assessment
-        5. Fallback handling for incomplete responses
+            RadiologyFindings: Structured medical findings for pneumothorax.
         """
         try:
-            lines = [line.strip() for line in raw_response.split('\n') if line.strip()]
-            
-            anatomical_structures = []
-            abnormalities = []
-            recommendations = []
-            impression = ""
-            confidence_level = "Medium"
-            
-            current_section = None
-            
-            for line in lines:
-                line_lower = line.lower()
-                
-                # Section detection using medical terminology
-                if any(keyword in line_lower for keyword in ['anatomy', 'structures', 'organs']):
-                    current_section = 'anatomy'
-                elif any(keyword in line_lower for keyword in ['abnormal', 'pathology', 'findings']):
-                    current_section = 'abnormal'
-                elif any(keyword in line_lower for keyword in ['recommend', 'suggest', 'advice']):
-                    current_section = 'recommend'
-                elif any(keyword in line_lower for keyword in ['impression', 'conclusion', 'summary']):
-                    current_section = 'impression'
-                elif any(keyword in line_lower for keyword in ['confidence', 'certain']):
-                    if 'high' in line_lower:
-                        confidence_level = "High"
-                    elif 'low' in line_lower:
-                        confidence_level = "Low"
-                
-                # Content categorization
-                if current_section == 'anatomy' and not any(keyword in line_lower for keyword in ['anatomy', 'structures']):
-                    anatomical_structures.append(line)
-                elif current_section == 'abnormal' and not any(keyword in line_lower for keyword in ['abnormal', 'pathology']):
-                    abnormalities.append(line)
-                elif current_section == 'recommend' and not any(keyword in line_lower for keyword in ['recommend', 'suggest']):
-                    recommendations.append(line)
-                elif current_section == 'impression' and not any(keyword in line_lower for keyword in ['impression', 'conclusion']):
-                    impression += line + " "
-            
-            # Fallback handling for incomplete responses
-            if not impression and not anatomical_structures and not abnormalities:
-                impression = raw_response
-            
-            # Default values for empty sections
-            if not anatomical_structures:
-                anatomical_structures = ["Chest structures visible"]
-            if not abnormalities:
-                abnormalities = ["No obvious abnormalities detected"]
-            if not recommendations:
-                recommendations = ["Clinical correlation recommended"]
-            if not impression:
-                impression = "Analysis completed. Clinical review recommended."
-            
+            import re
+            # Use regex to find confidence percentage
+            confidence_match = re.search(r'(\d+\.?\d*)\s?%', raw_response)
+            confidence = f"{confidence_match.group(1)}%" if confidence_match else "N/A"
+
+            # Determine finding based on model output
+            if "no pneumothorax detected" in raw_response.lower():
+                finding = "No Pneumothorax Detected"
+                abnormalities = ["No evidence of pneumothorax found."]
+            else:
+                finding = "Pneumothorax Detected"
+                abnormalities = ["Evidence of pneumothorax found."]
+
             return RadiologyFindings(
-                anatomical_structures=anatomical_structures,
+                anatomical_structures=["Chest structures analyzed for pneumothorax."],
                 abnormalities=abnormalities,
-                impression=impression.strip(),
-                recommendations=recommendations,
-                confidence_level=confidence_level
+                impression=finding,
+                recommendations=["Clinical correlation and expert review is recommended."],
+                confidence_level=confidence
             )
             
         except Exception as e:
@@ -348,7 +301,7 @@ class MedicalImageAnalyzer:
                 abnormalities=["Unable to parse detailed findings"],
                 impression=raw_response,
                 recommendations=["Manual review recommended"],
-                confidence_level="Low"
+                confidence_level="Not available"
             )
     
     async def analyze_image(self, image: Image.Image) -> tuple[str, RadiologyFindings]:
@@ -387,7 +340,7 @@ class MedicalImageAnalyzer:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Analyze this medical image. Describe anatomical structures, any abnormalities, and give a clinical impression."},
+                        {"type": "text", "text": "Analyze this medical image specifically for pneumothorax. Dont give any other information. Just tell me if there is pneumothorax or not/ If there is no pneumothorax, just say 'No pneumothorax detected'. Give confidence percentage in the response."},
                         {"type": "image", "image": image}
                     ]
                 }
@@ -500,15 +453,15 @@ class MedicalImageAnalyzer:
 
             # --- 1. Cover Page ---
             story.append(Spacer(1, 1 * inch))
-            story.append(Paragraph("Med-GEMMA-3", styles['CoverTitle']))
-            story.append(Paragraph("AI-Powered Medical Image Analysis Report", styles['CustomSubtitle']))
+            story.append(Paragraph("Pneumothorax Detection Report", styles['CoverTitle']))
+            story.append(Paragraph("AI-Powered Analysis with Med-GEMMA-3", styles['CustomSubtitle']))
             story.append(Spacer(1, 0.5 * inch))
             story.append(Paragraph(f"<b>Analysis ID:</b> {analysis_response.analysis_id}", styles['MetaInfo']))
             story.append(Paragraph(f"<b>Generated:</b> {analysis_response.timestamp}", styles['MetaInfo']))
             story.append(Spacer(1, 1 * inch))
             summary_text = (
-                f"<b>Clinical Impression:</b> {analysis_response.findings.impression}<br/><br/>"
-                f"<b>Confidence Level:</b> {analysis_response.findings.confidence_level}"
+                f"<b>Finding:</b> {analysis_response.findings.impression}<br/><br/>"
+                f"<b>Confidence:</b> {analysis_response.findings.confidence_level}"
             )
             story.append(Paragraph(summary_text, styles['SummaryBox']))
             story.append(PageBreak())
@@ -533,7 +486,8 @@ class MedicalImageAnalyzer:
             meta_data = [
                 ['Analysis ID', analysis_response.analysis_id],
                 ['Timestamp', analysis_response.timestamp],
-                ['Confidence Level', analysis_response.findings.confidence_level],
+                ['Finding', analysis_response.findings.impression],
+                ['Confidence', analysis_response.findings.confidence_level],
                 source_row,
                 ['Image Format', metadata.get("format", "N/A")],
                 ['Image Size', f"{metadata.get('size', 0) / 1024:.1f} KB"],
@@ -554,32 +508,9 @@ class MedicalImageAnalyzer:
             story.append(meta_table)
             story.append(Spacer(1, 0.3 * inch))
 
-            # --- 3. Key Findings Section ---
-            story.append(Paragraph("Key Findings", styles['SectionTitle']))
-            story.append(Paragraph(f"<b>Clinical Impression:</b> {analysis_response.findings.impression}", styles['KeyFinding']))
-            story.append(Spacer(1, 0.3 * inch))
-
-            # --- 4. Anatomical Structures ---
-            story.append(Paragraph("Anatomical Structures", styles['SectionTitle']))
-            for item in analysis_response.findings.anatomical_structures:
-                story.append(Paragraph(f"• {item}", styles['CustomBullet']))
-            story.append(Spacer(1, 0.3 * inch))
-
-            # --- 5. Abnormalities / Pathologies ---
-            story.append(Paragraph("Abnormalities / Pathologies", styles['SectionTitle']))
-            for item in analysis_response.findings.abnormalities:
-                story.append(Paragraph(f"• {item}", styles['CustomBullet']))
-            story.append(Spacer(1, 0.3 * inch))
-
-            # --- 6. Recommendations ---
-            story.append(Paragraph("Recommendations", styles['SectionTitle']))
-            for item in analysis_response.findings.recommendations:
-                story.append(Paragraph(f"• {item}", styles['CustomBullet']))
-            story.append(Spacer(1, 0.3 * inch))
-            
             story.append(PageBreak())
 
-            # --- 7. Detailed AI Analysis (Raw Output) ---
+            # --- 3. Detailed AI Analysis (Raw Output) ---
             story.append(Paragraph("Detailed AI Analysis", styles['SectionTitle']))
             story.append(Paragraph("The following is the raw, unformatted text generated by the AI model.", styles['Normal']))
             story.append(Spacer(1, 0.1 * inch))
@@ -587,7 +518,7 @@ class MedicalImageAnalyzer:
             story.append(Paragraph(raw_text_formatted, styles['AIAnalysis']))
             story.append(Spacer(1, 0.3 * inch))
 
-            # --- 8. Disclaimer ---
+            # --- 4. Disclaimer ---
             story.append(Paragraph("Disclaimer", styles['SectionTitle']))
             disclaimer_text = (
                 "This report was generated by an AI model (Med-GEMMA-3) and is intended for informational "
