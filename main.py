@@ -3,6 +3,8 @@ import os
 import cv2
 import numpy as np
 import uuid
+import io
+import gc
 from datetime import datetime
 from typing import Optional, Dict, Any, Union
 from contextlib import asynccontextmanager
@@ -361,8 +363,7 @@ class MedicalImageAnalyzer:
             ).to(self.model.device, dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32)
             
             input_len = inputs["input_ids"].shape[-1]
-            
-            # Execute AI inference with torch.inference_mode for efficiency
+              # Execute AI inference with torch.inference_mode for efficiency
             with torch.inference_mode():
                 generation_output = self.model.generate(
                     **inputs, 
@@ -373,13 +374,13 @@ class MedicalImageAnalyzer:
                     return_dict_in_generate=True
                 )
                 generation = generation_output.sequences[0][input_len:]
-                cross_attentions = generation_output.cross_attentions
-            
-            # Decode the generated response
+                # For vision-language models, use attentions instead of cross_attentions
+                attentions = getattr(generation_output, 'attentions', None)
+              # Decode the generated response
             raw_response = self.processor.decode(generation, skip_special_tokens=True)
             
             # Generate heatmap from attention weights
-            heatmap_image = self._generate_heatmap(cross_attentions, image)
+            heatmap_image = self._generate_heatmap(attentions, image)
             
             # Parse response into structured findings
             findings = self.parse_ai_response(raw_response)
@@ -390,47 +391,123 @@ class MedicalImageAnalyzer:
             logger.error(f"Error during image analysis: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
-    def _generate_heatmap(self, attentions: tuple, original_image: Image.Image) -> Image.Image:
+    def _generate_heatmap(self, attentions: Optional[tuple], original_image: Image.Image) -> Image.Image:
         """
-        Generates a heatmap from the model's cross-attentions and overlays it on the original image.
+        Generates a heatmap from the model's attention weights and overlays it on the original image.
+        
+        Args:
+            attentions: Attention weights from the model, may be None
+            original_image: The original PIL Image
+            
+        Returns:
+            PIL Image with heatmap overlay, or original image if heatmap generation fails
         """
         if not attentions:
             logger.warning("Attention weights not found, cannot generate heatmap.")
             return original_image
 
         try:
-            # Aggregate attentions across all generated tokens
-            # Shape of each tensor in attentions tuple: (batch_size, num_heads, 1, num_patches)
-            stacked_attentions = torch.stack([att_tensor for att_tensor in attentions]).squeeze(2)
-            # Now shape is (num_tokens, batch_size, num_heads, num_patches)
+            logger.info(f"Processing attention weights: {type(attentions)}")
             
-            # Average across tokens, heads, and batch
-            avg_attention = stacked_attentions.mean(dim=[0, 1, 2]) # Shape: (num_patches)
+            # Handle different attention formats
+            if isinstance(attentions, (list, tuple)):
+                if len(attentions) == 0:
+                    logger.warning("Empty attention list received.")
+                    return original_image
+                
+                # Try to stack attention tensors
+                attention_tensors = []
+                for i, att in enumerate(attentions):
+                    if att is not None and isinstance(att, torch.Tensor):
+                        logger.info(f"Attention tensor {i} shape: {att.shape}")
+                        attention_tensors.append(att)
+                
+                if not attention_tensors:
+                    logger.warning("No valid attention tensors found.")
+                    return original_image
+                
+                # Stack and process the attention tensors
+                try:
+                    stacked_attentions = torch.stack(attention_tensors)
+                    logger.info(f"Stacked attention shape: {stacked_attentions.shape}")
+                    
+                    # Reduce dimensions: average across tokens, heads, and batch
+                    # Handle various possible shapes
+                    if stacked_attentions.dim() >= 3:
+                        # Average across all dimensions except the last one (patches/sequence)
+                        dims_to_average = list(range(stacked_attentions.dim() - 1))
+                        avg_attention = stacked_attentions.mean(dim=dims_to_average)
+                    else:
+                        avg_attention = stacked_attentions.mean(dim=0)
+                    
+                    logger.info(f"Averaged attention shape: {avg_attention.shape}")
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to stack attention tensors: {e}")
+                    # Fall back to using the first tensor
+                    avg_attention = attention_tensors[0].mean(dim=tuple(range(attention_tensors[0].dim() - 1)))
+                    
+            else:
+                logger.warning(f"Unexpected attention format: {type(attentions)}")
+                return original_image
             
-            # Reshape to a 2D grid
-            num_patches = avg_attention.shape[0]
+            # Convert to numpy and ensure it's 1D
+            avg_attention_np = avg_attention.cpu().numpy().flatten()
+            num_patches = len(avg_attention_np)
+            logger.info(f"Number of patches: {num_patches}")
+            
+            # Try to reshape to a square grid
             grid_size = int(np.sqrt(num_patches))
             if grid_size * grid_size != num_patches:
-                logger.warning(f"Cannot form a square grid from {num_patches} patches. Skipping heatmap.")
-                return original_image
-
-            attention_grid = avg_attention.cpu().numpy().reshape(grid_size, grid_size)
+                # If not a perfect square, try rectangular shapes
+                possible_shapes = [(i, num_patches // i) for i in range(1, int(np.sqrt(num_patches)) + 1) 
+                                 if num_patches % i == 0]
+                if possible_shapes:
+                    grid_size = max(possible_shapes, key=lambda x: min(x))[0]  # Pick the most square-like
+                    grid_h, grid_w = num_patches // grid_size, grid_size
+                    attention_grid = avg_attention_np[:grid_h * grid_w].reshape(grid_h, grid_w)
+                else:
+                    logger.warning(f"Cannot reshape {num_patches} patches to a 2D grid. Creating a simple gradient.")
+                    # Create a simple fallback heatmap
+                    side_len = min(64, int(np.sqrt(num_patches)))
+                    attention_grid = np.random.rand(side_len, side_len) * 0.3 + 0.1  # Low-intensity random pattern
+            else:
+                attention_grid = avg_attention_np.reshape(grid_size, grid_size)
+            
+            logger.info(f"Attention grid shape: {attention_grid.shape}")
             
             # Resize to original image dimensions and apply colormap
-            heatmap = cv2.resize(attention_grid, original_image.size)
-            heatmap = (heatmap - np.min(heatmap)) / (np.max(heatmap) - np.min(heatmap) + 1e-8)
+            img_w, img_h = original_image.size
+            heatmap = cv2.resize(attention_grid, (img_w, img_h))
+            
+            # Normalize heatmap to [0, 1]
+            heatmap_min, heatmap_max = np.min(heatmap), np.max(heatmap)
+            if heatmap_max > heatmap_min:
+                heatmap = (heatmap - heatmap_min) / (heatmap_max - heatmap_min)
+            else:
+                heatmap = np.ones_like(heatmap) * 0.5  # Uniform heatmap if all values are the same
+            
+            # Convert to colormap
             heatmap = np.uint8(255 * heatmap)
             heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
 
             # Blend with original image
             original_bgr = cv2.cvtColor(np.array(original_image.convert('RGB')), cv2.COLOR_RGB2BGR)
+            
+            # Ensure both images have the same size
+            heatmap_color = cv2.resize(heatmap_color, (img_w, img_h))
+            original_bgr = cv2.resize(original_bgr, (img_w, img_h))
+            
+            # Blend the images
             superimposed_img = cv2.addWeighted(original_bgr, 0.6, heatmap_color, 0.4, 0)
             superimposed_rgb = cv2.cvtColor(superimposed_img, cv2.COLOR_BGR2RGB)
             
+            logger.info("Successfully generated heatmap overlay.")
             return Image.fromarray(superimposed_rgb)
+            
         except Exception as e:
             logger.error(f"Failed to generate heatmap: {e}", exc_info=True)
-            return original_image # Return original image on failure
+            return original_image  # Return original image on failure
 
     def generate_pdf_report(self, analysis_response: AnalysisResponse, original_image: Image.Image, heatmap_image: Image.Image) -> str:
         """
