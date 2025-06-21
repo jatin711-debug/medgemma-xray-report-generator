@@ -447,6 +447,10 @@ class MedicalImageAnalyzer:
                     # Shape should be (batch, heads, seq_len, seq_len) or similar
                     attention_tensor = last_attention.cpu().detach()
                     
+                    # Handle BFloat16 conversion early
+                    if attention_tensor.dtype == torch.bfloat16:
+                        attention_tensor = attention_tensor.float()
+                    
                     # Average across batch and heads dimensions
                     if attention_tensor.dim() == 4:  # (batch, heads, seq_len, seq_len)
                         # Take mean across batch and heads, then get attention to image tokens
@@ -471,8 +475,13 @@ class MedicalImageAnalyzer:
                     else:  # Other dimensions
                         attention_map = attention_tensor.flatten()
                     
-                    # Convert to numpy
-                    attention_np = attention_map.numpy() if hasattr(attention_map, 'numpy') else attention_map.cpu().numpy()
+                    # Convert to numpy - handle different dtypes properly
+                    if attention_map.dtype == torch.bfloat16:
+                        attention_np = attention_map.float().numpy()
+                    elif hasattr(attention_map, 'numpy'):
+                        attention_np = attention_map.numpy()
+                    else:
+                        attention_np = attention_map.cpu().numpy()
                     
                     # Ensure we have valid attention weights
                     if len(attention_np) == 0:
