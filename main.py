@@ -245,14 +245,23 @@ class MedicalImageAnalyzer:
             # 5. Load the processor and the model with recommended settings
             self.processor = AutoProcessor.from_pretrained(self.model_id)
             
-            self.model = AutoModelForImageTextToText.from_pretrained(
-                self.model_id,
-                torch_dtype=torch_dtype,
-                device_map=device,
-                use_safetensors=True,
-                # Use PyTorch's native attention implementation for best eager-mode performance
-                attn_implementation="flash_attention_2" if torch.cuda.is_available() else "sdpa"
-            )
+            try:
+                self.model = AutoModelForImageTextToText.from_pretrained(
+                    self.model_id,
+                    torch_dtype=torch_dtype,
+                    device_map=device,
+                    use_safetensors=True,
+                    attn_implementation="flash_attention_2"
+                )
+            except ImportError:
+                logger.warning("FlashAttention2 not available. Falling back to 'sdpa'")
+                self.model = AutoModelForImageTextToText.from_pretrained(
+                    self.model_id,
+                    torch_dtype=torch_dtype,
+                    device_map=device,
+                    use_safetensors=True,
+                    attn_implementation="sdpa"
+                )
             
             self.model_loaded = True
             model_loading_error = None
