@@ -33,7 +33,7 @@ from reportlab.lib.enums import TA_CENTER
 import gc
 
 import torch
-from transformers import AutoProcessor, AutoModelForImageTextToText
+from transformers import AutoProcessor, AutoModelForImageTextToText, Idefics2ForConditionalGeneration 
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -251,7 +251,7 @@ class MedicalImageAnalyzer:
                 device_map=device,
                 use_safetensors=True,
                 # Use PyTorch's native attention implementation for best eager-mode performance
-                attn_implementation="sdpa" 
+                attn_implementation="flash_attention_2" if torch.cuda.is_available() else "sdpa"
             )
             
             self.model_loaded = True
@@ -310,34 +310,15 @@ class MedicalImageAnalyzer:
     
     async def analyze_image(self, image: Image.Image) -> tuple[str, RadiologyFindings, Image.Image]:
         """
-        Perform AI-powered medical image analysis using Med-GEMMA-3.
-        
-        This is the core analysis method that processes medical images and generates
-        clinical insights using the loaded AI model with proper chat template.
-        
-        Args:
-            image: PIL Image object in RGB format
-            
-        Returns:
-            tuple: (raw_response, structured_findings, heatmap_image)
-            - raw_response: Original AI model output text
-            - structured_findings: Parsed RadiologyFindings object
-            - heatmap_image: PIL Image of the generated heatmap overlay
-            
-        Raises:
-            HTTPException: If analysis fails or model is not loaded
-            
-        Process:
-        1. Ensure model is loaded and ready
-        2. Prepare clinical analysis prompt using chat template
-        3. Execute AI inference with proper tokenization and attention capture
-        4. Generate a heatmap from the model's attention
-        5. Parse and structure the response
+        Perform AI-powered medical image analysis using Med-GEMMA.
+        Returns raw text response, structured findings, and a heatmap overlay.
         """
         await self.load_model()
-        
+
         try:
-            # Prepare clinical analysis messages for Med-GEMMA-3 chat template
+            # Resize image to match model input expectations (usually 224x224)
+            image = image.resize((224, 224))
+
             messages = [
                 {
                     "role": "system",
@@ -346,167 +327,106 @@ class MedicalImageAnalyzer:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Analyze this medical image specifically for pneumothorax. Dont give any other information. Just tell me if there is pneumothorax or not/ If there is no pneumothorax, just say 'No pneumothorax detected'. Give confidence percentage in the response."},
+                        {"type": "text", "text": "Analyze this medical image specifically for pneumothorax. "
+                                                "Don't give any other information. Just say if pneumothorax is detected or not. "
+                                                "If none, say 'No pneumothorax detected'. Give confidence percentage in the response."},
                         {"type": "image", "image": image}
                     ]
                 }
             ]
-            
-            # Apply chat template and tokenize
+
+            # Prepare inputs with processor
             inputs = self.processor.apply_chat_template(
-                messages, 
-                add_generation_prompt=True, 
+                messages,
+                add_generation_prompt=True,
                 tokenize=True,
-                return_dict=True, 
+                return_dict=True,
                 return_tensors="pt"
             ).to(self.model.device, dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32)
-            
+
             input_len = inputs["input_ids"].shape[-1]
-              # Execute AI inference with torch.inference_mode for efficiency
+
             with torch.inference_mode():
                 generation_output = self.model.generate(
-                    **inputs, 
-                    max_new_tokens=512, 
+                    **inputs,
+                    max_new_tokens=512,
                     do_sample=False,
-                    use_cache=True,
                     output_attentions=True,
                     return_dict_in_generate=True
                 )
-                generation = generation_output.sequences[0][input_len:]
-                # For vision-language models, use attentions instead of cross_attentions
-                attentions = getattr(generation_output, 'attentions', None)
-              # Decode the generated response
+
+            generation = generation_output.sequences[0][input_len:]
             raw_response = self.processor.decode(generation, skip_special_tokens=True)
-            
-            # Generate heatmap from attention weights
+
+            # Try to get decoder attentions (more reliable than full attention)
+            attentions = getattr(generation_output, "decoder_attentions", None)
+
+            # Generate heatmap overlay
             heatmap_image = self._generate_heatmap(attentions, image)
-            
-            # Parse response into structured findings
+
+            # Parse and return findings
             findings = self.parse_ai_response(raw_response)
-            
             return raw_response, findings, heatmap_image
-        
+
         except Exception as e:
             logger.error(f"Error during image analysis: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
     def _generate_heatmap(self, attentions: Optional[tuple], original_image: Image.Image) -> Image.Image:
         """
-        Generates a heatmap from the model's attention weights and overlays it on the original image.
-        
-        Args:
-            attentions: Attention weights from the model, may be None
-            original_image: The original PIL Image
-            
-        Returns:
-            PIL Image with heatmap overlay, or original image if heatmap generation fails
+        Generates a heatmap from attention weights and overlays it on the original image.
         """
         if not attentions:
-            logger.warning("Attention weights not found, cannot generate heatmap.")
+            logger.warning("No attention weights found.")
             return original_image
 
         try:
-            logger.info(f"Processing attention weights: {type(attentions)}")
-            
-            # Handle different attention formats
-            if isinstance(attentions, (list, tuple)):
-                if len(attentions) == 0:
-                    logger.warning("Empty attention list received.")
-                    return original_image
-                
-                # Try to stack attention tensors
-                attention_tensors = []
-                for i, att in enumerate(attentions):
-                    if att is not None and isinstance(att, torch.Tensor):
-                        logger.info(f"Attention tensor {i} shape: {att.shape}")
-                        attention_tensors.append(att)
-                
-                if not attention_tensors:
-                    logger.warning("No valid attention tensors found.")
-                    return original_image
-                
-                # Stack and process the attention tensors
-                try:
-                    stacked_attentions = torch.stack(attention_tensors)
-                    logger.info(f"Stacked attention shape: {stacked_attentions.shape}")
-                    
-                    # Reduce dimensions: average across tokens, heads, and batch
-                    # Handle various possible shapes
-                    if stacked_attentions.dim() >= 3:
-                        # Average across all dimensions except the last one (patches/sequence)
-                        dims_to_average = list(range(stacked_attentions.dim() - 1))
-                        avg_attention = stacked_attentions.mean(dim=dims_to_average)
-                    else:
-                        avg_attention = stacked_attentions.mean(dim=0)
-                    
-                    logger.info(f"Averaged attention shape: {avg_attention.shape}")
-                    
-                except Exception as e:
-                    logger.warning(f"Failed to stack attention tensors: {e}")
-                    # Fall back to using the first tensor
-                    avg_attention = attention_tensors[0].mean(dim=tuple(range(attention_tensors[0].dim() - 1)))
-                    
-            else:
-                logger.warning(f"Unexpected attention format: {type(attentions)}")
+            # Extract attention tensors (list of layers)
+            attention_tensors = [att for att in attentions if isinstance(att, torch.Tensor)]
+            if not attention_tensors:
+                logger.warning("No valid attention tensors.")
                 return original_image
-            
-            # Convert to numpy and ensure it's 1D
-            avg_attention_np = avg_attention.cpu().numpy().flatten()
-            num_patches = len(avg_attention_np)
-            logger.info(f"Number of patches: {num_patches}")
-            
-            # Try to reshape to a square grid
-            grid_size = int(np.sqrt(num_patches))
-            if grid_size * grid_size != num_patches:
-                # If not a perfect square, try rectangular shapes
-                possible_shapes = [(i, num_patches // i) for i in range(1, int(np.sqrt(num_patches)) + 1) 
-                                 if num_patches % i == 0]
-                if possible_shapes:
-                    grid_size = max(possible_shapes, key=lambda x: min(x))[0]  # Pick the most square-like
-                    grid_h, grid_w = num_patches // grid_size, grid_size
-                    attention_grid = avg_attention_np[:grid_h * grid_w].reshape(grid_h, grid_w)
-                else:
-                    logger.warning(f"Cannot reshape {num_patches} patches to a 2D grid. Creating a simple gradient.")
-                    # Create a simple fallback heatmap
-                    side_len = min(64, int(np.sqrt(num_patches)))
-                    attention_grid = np.random.rand(side_len, side_len) * 0.3 + 0.1  # Low-intensity random pattern
-            else:
-                attention_grid = avg_attention_np.reshape(grid_size, grid_size)
-            
-            logger.info(f"Attention grid shape: {attention_grid.shape}")
-            
-            # Resize to original image dimensions and apply colormap
-            img_w, img_h = original_image.size
-            heatmap = cv2.resize(attention_grid, (img_w, img_h))
-            
-            # Normalize heatmap to [0, 1]
-            heatmap_min, heatmap_max = np.min(heatmap), np.max(heatmap)
-            if heatmap_max > heatmap_min:
-                heatmap = (heatmap - heatmap_min) / (heatmap_max - heatmap_min)
-            else:
-                heatmap = np.ones_like(heatmap) * 0.5  # Uniform heatmap if all values are the same
-            
-            # Convert to colormap
-            heatmap = np.uint8(255 * heatmap)
-            heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
 
-            # Blend with original image
-            original_bgr = cv2.cvtColor(np.array(original_image.convert('RGB')), cv2.COLOR_RGB2BGR)
-            
-            # Ensure both images have the same size
-            heatmap_color = cv2.resize(heatmap_color, (img_w, img_h))
-            original_bgr = cv2.resize(original_bgr, (img_w, img_h))
-            
-            # Blend the images
-            superimposed_img = cv2.addWeighted(original_bgr, 0.6, heatmap_color, 0.4, 0)
-            superimposed_rgb = cv2.cvtColor(superimposed_img, cv2.COLOR_BGR2RGB)
-            
-            logger.info("Successfully generated heatmap overlay.")
-            return Image.fromarray(superimposed_rgb)
-            
+            # Shape: (batch, heads, tgt_len, src_len)
+            # We'll average across layers, heads, and target tokens
+            stacked = torch.stack(attention_tensors)  # (layers, batch, heads, tgt, src)
+            avg_attention = stacked.mean(dim=(0, 1, 2))  # shape: (src_len,) or (src_len,)
+
+            attention_np = avg_attention.cpu().numpy().flatten()
+            num_patches = len(attention_np)
+
+            # Try to reshape to square grid
+            side = int(np.sqrt(num_patches))
+            if side * side != num_patches:
+                # Fallback: try best-fit rectangle
+                factors = [(i, num_patches // i) for i in range(1, side + 1) if num_patches % i == 0]
+                if not factors:
+                    logger.warning("Cannot reshape attention to grid. Generating placeholder heatmap.")
+                    heatmap = np.ones((64, 64)) * 0.3
+                else:
+                    h, w = max(factors, key=lambda x: min(x))
+                    heatmap = attention_np[:h * w].reshape(h, w)
+            else:
+                heatmap = attention_np.reshape(side, side)
+
+            # Normalize
+            heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
+            heatmap = cv2.resize(heatmap, original_image.size)
+
+            # Colorize
+            heatmap_uint8 = np.uint8(255 * heatmap)
+            heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+
+            original_bgr = cv2.cvtColor(np.array(original_image.convert("RGB")), cv2.COLOR_RGB2BGR)
+            blended = cv2.addWeighted(original_bgr, 0.6, heatmap_color, 0.4, 0)
+            blended_rgb = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
+
+            return Image.fromarray(blended_rgb)
+
         except Exception as e:
-            logger.error(f"Failed to generate heatmap: {e}", exc_info=True)
-            return original_image  # Return original image on failure
+            logger.error(f"Heatmap generation failed: {e}", exc_info=True)
+            return original_image
+
 
     def generate_pdf_report(self, analysis_response: AnalysisResponse, original_image: Image.Image, heatmap_image: Image.Image) -> str:
         """
