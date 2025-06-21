@@ -245,22 +245,23 @@ class MedicalImageAnalyzer:
             # 5. Load the processor and the model with recommended settings
             self.processor = AutoProcessor.from_pretrained(self.model_id)
             
+            # Use "eager" attention implementation to ensure attention weights are output for heatmap generation.
+            # Performance-optimized implementations like "flash_attention_2" or "sdpa" do not support this.
             try:
                 self.model = AutoModelForImageTextToText.from_pretrained(
                     self.model_id,
                     torch_dtype=torch_dtype,
                     device_map=device,
                     use_safetensors=True,
-                    attn_implementation="flash_attention_2"
+                    attn_implementation="eager"  # Force eager attention for heatmap generation
                 )
-            except ImportError:
-                logger.warning("FlashAttention2 not available. Falling back to 'sdpa'")
+            except (ImportError, ValueError): # Fallback if even eager has issues (unlikely)
+                logger.warning("Default 'eager' attention implementation failed. Retrying without explicit implementation.")
                 self.model = AutoModelForImageTextToText.from_pretrained(
                     self.model_id,
                     torch_dtype=torch_dtype,
                     device_map=device,
-                    use_safetensors=True,
-                    attn_implementation="sdpa"
+                    use_safetensors=True
                 )
             
             self.model_loaded = True
@@ -516,49 +517,28 @@ class MedicalImageAnalyzer:
 
     def _reshape_attention_to_grid(self, attention_np: np.ndarray) -> np.ndarray:
         """
-        Reshape 1D attention weights to a 2D spatial grid.
+        Reshape 1D attention weights to a 2D spatial grid, assuming image tokens are at the end.
+        This is specifically tailored for models that process a 224x224 image into a 14x14 patch grid.
         """
-        num_tokens = len(attention_np)
+        # For a 224x224 image with 16x16 patches, the grid is 14x14.
+        PATCH_GRID_SIZE = 14
+        NUM_PATCHES = PATCH_GRID_SIZE * PATCH_GRID_SIZE  # 196
+
+        # The full sequence includes text tokens and image patch tokens.
+        # We assume the image patch tokens are the last `NUM_PATCHES` elements.
+        if len(attention_np) < NUM_PATCHES:
+            logger.warning(
+                f"Attention vector length ({len(attention_np)}) is smaller than the expected "
+                f"number of image patches ({NUM_PATCHES}). Creating a placeholder grid."
+            )
+            # Fallback: create a blank heatmap if attention is not as expected.
+            return np.zeros((PATCH_GRID_SIZE, PATCH_GRID_SIZE))
+
+        # Extract the attention weights corresponding to the image patches.
+        image_attention = attention_np[-NUM_PATCHES:]
         
-        # Common vision transformer patch counts (excluding special tokens)
-        # For 224x224 images: 14x14=196 patches, plus class token = 197
-        # Try to find the best square or rectangular fit
-        
-        # Remove potential special tokens (like CLS token)
-        possible_patch_counts = [num_tokens, num_tokens - 1, num_tokens - 2]
-        
-        for patch_count in possible_patch_counts:
-            if patch_count <= 0:
-                continue
-                
-            # Try perfect squares first
-            sqrt_patches = int(np.sqrt(patch_count))
-            if sqrt_patches * sqrt_patches == patch_count:
-                attention_subset = attention_np[:patch_count]
-                return attention_subset.reshape(sqrt_patches, sqrt_patches)
-        
-        # If no perfect square, try common vision transformer sizes
-        common_sizes = [(14, 14), (16, 16), (7, 7), (8, 8), (28, 28)]
-        for h, w in common_sizes:
-            if h * w <= num_tokens:
-                attention_subset = attention_np[:h*w]
-                return attention_subset.reshape(h, w)
-        
-        # Fallback: create a reasonable rectangular grid
-        if num_tokens >= 64:
-            side = min(int(np.sqrt(num_tokens)), 16)  # Cap at 16x16
-            attention_subset = attention_np[:side*side]
-            return attention_subset.reshape(side, side)
-        else:
-            # For very small attention maps, create a minimal 4x4 grid
-            side = max(int(np.sqrt(num_tokens)), 2)
-            if side * side > num_tokens:
-                # Pad with mean values
-                padded_attention = np.pad(attention_np, (0, side*side - num_tokens), 'constant', constant_values=attention_np.mean())
-                return padded_attention.reshape(side, side)
-            else:
-                attention_subset = attention_np[:side*side]
-                return attention_subset.reshape(side, side)
+        # Reshape into the 2D grid that matches the image's patch structure.
+        return image_attention.reshape(PATCH_GRID_SIZE, PATCH_GRID_SIZE)
 
     def _create_heatmap_overlay(self, heatmap: np.ndarray, original_image: Image.Image) -> Image.Image:
         """
