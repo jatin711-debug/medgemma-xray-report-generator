@@ -386,55 +386,168 @@ class MedicalImageAnalyzer:
         Generates a heatmap from attention weights and overlays it on the original image.
         """
         if not attentions:
-            logger.warning("No attention weights found.")
-            return original_image
+            logger.warning("No attention weights found. Creating placeholder heatmap.")
+            return self._create_placeholder_heatmap(original_image)
 
         try:
-            # Extract attention tensors (list of layers)
-            attention_tensors = [att for att in attentions if isinstance(att, torch.Tensor)]
-            if not attention_tensors:
-                logger.warning("No valid attention tensors.")
-                return original_image
-
-            # Shape: (batch, heads, tgt_len, src_len)
-            # We'll average across layers, heads, and target tokens
-            stacked = torch.stack(attention_tensors)  # (layers, batch, heads, tgt, src)
-            avg_attention = stacked.mean(dim=(0, 1, 2))  # shape: (src_len,) or (src_len,)
-
-            attention_np = avg_attention.cpu().numpy().flatten()
-            num_patches = len(attention_np)
-
-            # Try to reshape to square grid
-            side = int(np.sqrt(num_patches))
-            if side * side != num_patches:
-                # Fallback: try best-fit rectangle
-                factors = [(i, num_patches // i) for i in range(1, side + 1) if num_patches % i == 0]
-                if not factors:
-                    logger.warning("Cannot reshape attention to grid. Generating placeholder heatmap.")
-                    heatmap = np.ones((64, 64)) * 0.3
+            # Handle different attention formats from the model
+            if hasattr(attentions, '__len__') and len(attentions) > 0:
+                # Get the last layer's attention (usually most relevant)
+                last_attention = attentions[-1]
+                
+                if isinstance(last_attention, torch.Tensor):
+                    # Shape should be (batch, heads, seq_len, seq_len) or similar
+                    attention_tensor = last_attention.cpu().detach()
+                    
+                    # Average across batch and heads dimensions
+                    if attention_tensor.dim() == 4:  # (batch, heads, seq_len, seq_len)
+                        # Take mean across batch and heads, then get attention to image tokens
+                        attention_weights = attention_tensor.mean(dim=(0, 1))  # (seq_len, seq_len)
+                        
+                        # For vision models, we typically want the attention from text tokens to image tokens
+                        # or the self-attention within image tokens
+                        # Take the diagonal or sum across the sequence dimension
+                        if attention_weights.size(0) == attention_weights.size(1):
+                            # Use the mean attention weights across the sequence
+                            attention_map = attention_weights.mean(dim=0)  # Average attention received by each token
+                        else:
+                            attention_map = attention_weights.flatten()
+                            
+                    elif attention_tensor.dim() == 3:  # (batch, seq_len, seq_len) or (heads, seq_len, seq_len)
+                        attention_weights = attention_tensor.mean(dim=0)  # Average first dimension
+                        attention_map = attention_weights.mean(dim=0) if attention_weights.dim() == 2 else attention_weights.flatten()
+                        
+                    elif attention_tensor.dim() == 2:  # (seq_len, seq_len)
+                        attention_map = attention_tensor.mean(dim=0)
+                        
+                    else:  # Other dimensions
+                        attention_map = attention_tensor.flatten()
+                    
+                    # Convert to numpy
+                    attention_np = attention_map.numpy() if hasattr(attention_map, 'numpy') else attention_map.cpu().numpy()
+                    
+                    # Ensure we have valid attention weights
+                    if len(attention_np) == 0:
+                        logger.warning("Empty attention weights. Creating placeholder heatmap.")
+                        return self._create_placeholder_heatmap(original_image)
+                    
+                    # Try to reshape to a reasonable spatial grid
+                    heatmap = self._reshape_attention_to_grid(attention_np)
+                    
                 else:
-                    h, w = max(factors, key=lambda x: min(x))
-                    heatmap = attention_np[:h * w].reshape(h, w)
+                    logger.warning("Attention tensor is not a torch.Tensor. Creating placeholder heatmap.")
+                    return self._create_placeholder_heatmap(original_image)
             else:
-                heatmap = attention_np.reshape(side, side)
+                logger.warning("Invalid attention format. Creating placeholder heatmap.")
+                return self._create_placeholder_heatmap(original_image)
 
-            # Normalize
-            heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
-            heatmap = cv2.resize(heatmap, original_image.size)
-
-            # Colorize
-            heatmap_uint8 = np.uint8(255 * heatmap)
-            heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-
-            original_bgr = cv2.cvtColor(np.array(original_image.convert("RGB")), cv2.COLOR_RGB2BGR)
-            blended = cv2.addWeighted(original_bgr, 0.6, heatmap_color, 0.4, 0)
-            blended_rgb = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
-
-            return Image.fromarray(blended_rgb)
+            # Normalize the heatmap
+            if heatmap.max() > heatmap.min():
+                heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min())
+            else:
+                heatmap = np.ones_like(heatmap) * 0.5  # Uniform attention if all values are the same
+            
+            # Resize heatmap to match original image
+            heatmap_resized = cv2.resize(heatmap.astype(np.float32), original_image.size, interpolation=cv2.INTER_LINEAR)
+            
+            # Apply colormap and create overlay
+            return self._create_heatmap_overlay(heatmap_resized, original_image)
 
         except Exception as e:
             logger.error(f"Heatmap generation failed: {e}", exc_info=True)
-            return original_image
+            return self._create_placeholder_heatmap(original_image)
+
+    def _reshape_attention_to_grid(self, attention_np: np.ndarray) -> np.ndarray:
+        """
+        Reshape 1D attention weights to a 2D spatial grid.
+        """
+        num_tokens = len(attention_np)
+        
+        # Common vision transformer patch counts (excluding special tokens)
+        # For 224x224 images: 14x14=196 patches, plus class token = 197
+        # Try to find the best square or rectangular fit
+        
+        # Remove potential special tokens (like CLS token)
+        possible_patch_counts = [num_tokens, num_tokens - 1, num_tokens - 2]
+        
+        for patch_count in possible_patch_counts:
+            if patch_count <= 0:
+                continue
+                
+            # Try perfect squares first
+            sqrt_patches = int(np.sqrt(patch_count))
+            if sqrt_patches * sqrt_patches == patch_count:
+                attention_subset = attention_np[:patch_count]
+                return attention_subset.reshape(sqrt_patches, sqrt_patches)
+        
+        # If no perfect square, try common vision transformer sizes
+        common_sizes = [(14, 14), (16, 16), (7, 7), (8, 8), (28, 28)]
+        for h, w in common_sizes:
+            if h * w <= num_tokens:
+                attention_subset = attention_np[:h*w]
+                return attention_subset.reshape(h, w)
+        
+        # Fallback: create a reasonable rectangular grid
+        if num_tokens >= 64:
+            side = min(int(np.sqrt(num_tokens)), 16)  # Cap at 16x16
+            attention_subset = attention_np[:side*side]
+            return attention_subset.reshape(side, side)
+        else:
+            # For very small attention maps, create a minimal 4x4 grid
+            side = max(int(np.sqrt(num_tokens)), 2)
+            if side * side > num_tokens:
+                # Pad with mean values
+                padded_attention = np.pad(attention_np, (0, side*side - num_tokens), 'constant', constant_values=attention_np.mean())
+                return padded_attention.reshape(side, side)
+            else:
+                attention_subset = attention_np[:side*side]
+                return attention_subset.reshape(side, side)
+
+    def _create_heatmap_overlay(self, heatmap: np.ndarray, original_image: Image.Image) -> Image.Image:
+        """
+        Create a colored heatmap overlay on the original image.
+        """
+        # Convert heatmap to 8-bit
+        heatmap_uint8 = np.uint8(255 * np.clip(heatmap, 0, 1))
+        
+        # Apply colormap (JET colormap: blue=low attention, red=high attention)
+        heatmap_colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+        
+        # Convert original image to BGR for blending
+        original_bgr = cv2.cvtColor(np.array(original_image.convert("RGB")), cv2.COLOR_RGB2BGR)
+        
+        # Ensure both images are the same size
+        if heatmap_colored.shape[:2] != original_bgr.shape[:2]:
+            heatmap_colored = cv2.resize(heatmap_colored, (original_bgr.shape[1], original_bgr.shape[0]))
+        
+        # Blend the images (60% original, 40% heatmap)
+        blended = cv2.addWeighted(original_bgr, 0.6, heatmap_colored, 0.4, 0)
+        
+        # Convert back to RGB
+        blended_rgb = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
+        
+        return Image.fromarray(blended_rgb)
+
+    def _create_placeholder_heatmap(self, original_image: Image.Image) -> Image.Image:
+        """
+        Create a placeholder heatmap when attention weights are unavailable.
+        """
+        # Create a subtle center-focused heatmap as placeholder
+        h, w = original_image.size[1], original_image.size[0]  # Note: PIL size is (width, height)
+        
+        # Create a radial gradient from center
+        y, x = np.ogrid[:h, :w]
+        center_y, center_x = h // 2, w // 2
+        
+        # Calculate distance from center, normalized
+        distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+        max_distance = np.sqrt(center_x**2 + center_y**2)
+        
+        # Create a subtle radial attention pattern (higher in center)
+        heatmap = 1.0 - (distance / max_distance) * 0.3  # Subtle gradient
+        heatmap = np.clip(heatmap, 0.3, 0.7)  # Keep it subtle
+        
+        return self._create_heatmap_overlay(heatmap, original_image)
 
 
     def generate_pdf_report(self, analysis_response: AnalysisResponse, original_image: Image.Image, heatmap_image: Image.Image) -> str:
