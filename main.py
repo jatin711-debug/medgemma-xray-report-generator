@@ -354,21 +354,69 @@ class MedicalImageAnalyzer:
             ).to(self.model.device, dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32)
 
             input_len = inputs["input_ids"].shape[-1]
+            attentions = None
 
             with torch.inference_mode():
+                # Method 1: Try to get attentions from a single forward pass first
+                try:
+                    # Get attention weights from forward pass (more reliable)
+                    forward_outputs = self.model(
+                        **inputs,
+                        output_attentions=True,
+                        use_cache=False  # Disable cache to ensure attention computation
+                    )
+                    
+                    if hasattr(forward_outputs, 'attentions') and forward_outputs.attentions:
+                        attentions = forward_outputs.attentions
+                        logger.info(f"✅ Got attentions from forward pass: {len(attentions)} layers")
+                    else:
+                        logger.warning("No attentions from forward pass")
+                        
+                except Exception as e:
+                    logger.warning(f"Forward pass failed: {e}")
+
+                # Generate the response
                 generation_output = self.model.generate(
                     **inputs,
                     max_new_tokens=512,
                     do_sample=False,
                     output_attentions=True,
-                    return_dict_in_generate=True
+                    return_dict_in_generate=True,
+                    use_cache=False  # Ensure clean generation
                 )
 
+                # Method 2: Try to get attentions from generation if forward pass failed
+                if attentions is None:
+                    # Check all possible attention attributes
+                    attention_attrs = ['attentions', 'decoder_attentions', 'cross_attentions', 'encoder_attentions']
+                    
+                    for attr_name in attention_attrs:
+                        if hasattr(generation_output, attr_name):
+                            attr_value = getattr(generation_output, attr_name)
+                            if attr_value is not None:
+                                attentions = attr_value
+                                logger.info(f"✅ Got attentions from generation.{attr_name}: {len(attentions) if hasattr(attentions, '__len__') else 'unknown length'}")
+                                break
+                    
+                    if attentions is None:
+                        logger.warning("No attentions found in generation output")
+                        # Debug what's available
+                        available_attrs = [attr for attr in dir(generation_output) if not attr.startswith('_')]
+                        logger.info(f"Available generation output attributes: {available_attrs}")
+
+            # Decode the generated response
             generation = generation_output.sequences[0][input_len:]
             raw_response = self.processor.decode(generation, skip_special_tokens=True)
 
-            # Try to get decoder attentions (more reliable than full attention)
-            attentions = getattr(generation_output, "decoder_attentions", None)
+            # Debug attention information
+            if attentions is not None:
+                logger.info(f"Attention info - Type: {type(attentions)}, Length: {len(attentions) if hasattr(attentions, '__len__') else 'No len'}")
+                if hasattr(attentions, '__len__') and len(attentions) > 0:
+                    first_attention = attentions[0] if isinstance(attentions, (list, tuple)) else attentions
+                    if hasattr(first_attention, 'shape'):
+                        logger.info(f"First attention shape: {first_attention.shape}")
+            else:
+                logger.warning("⚠️  Still no attentions found - will create placeholder heatmap")
 
             # Generate heatmap overlay
             heatmap_image = self._generate_heatmap(attentions, image)
