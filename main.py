@@ -327,7 +327,7 @@ class MedicalImageAnalyzer:
 
         try:
             # Resize image to match model input expectations (usually 224x224)
-            image = image.resize((224, 224))
+            image_for_model = image.resize((224, 224))
 
             messages = [
                 {
@@ -340,7 +340,7 @@ class MedicalImageAnalyzer:
                         {"type": "text", "text": "Analyze this medical image specifically for pneumothorax. "
                                                 "Don't give any other information. Just say if pneumothorax is detected or not. "
                                                 "If none, say 'No pneumothorax detected'. Give confidence percentage in the response."},
-                        {"type": "image", "image": image}
+                        {"type": "image", "image": image_for_model}
                     ]
                 }
             ]
