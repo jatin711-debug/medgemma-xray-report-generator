@@ -21,16 +21,22 @@ from fastapi.responses import FileResponse
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, HttpUrl
 from PIL import Image
+
+
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib import colors
+from reportlab.lib.units import inch, cm
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, 
+    PageBreak, Image as ReportLabImage, KeepTogether, Frame
+)
 from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import PageTemplate, BaseDocTemplate, Frame, Paragraph, Spacer, Table, TableStyle, Image as ReportLabImage, PageBreak
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.units import inch
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.utils import ImageReader
+
 import gc
 
 import torch
@@ -168,8 +174,423 @@ class MedicalImageAnalyzer:
         self.max_image_size = 10 * 1024 * 1024  # 10MB
         self.allowed_extensions = {'.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.webp'}
         self.model_loaded = False
+        self._setup_fonts()
+        self._setup_colors()
+        self._setup_styles()
+
         self.ensure_reports_directory()
         
+    def _setup_fonts(self):
+        """Register fonts with fallback to system fonts"""
+        try:
+            # Try to register custom fonts
+            pdfmetrics.registerFont(TTFont('CustomRegular', 'assets/Roboto-Regular.ttf'))
+            pdfmetrics.registerFont(TTFont('CustomBold', 'assets/Roboto-Bold.ttf'))
+            self.font_regular = 'CustomRegular'
+            self.font_bold = 'CustomBold'
+        except Exception:
+            # Fallback to built-in fonts
+            logger.info("Custom fonts not found, using built-in fonts")
+            self.font_regular = 'Helvetica'
+            self.font_bold = 'Helvetica-Bold'
+
+    def _setup_colors(self):
+        """Define professional color scheme"""
+        self.colors = {
+            'primary': colors.HexColor("#2E7D9A"),      # Medical blue
+            'secondary': colors.HexColor("#4A90A4"),    # Lighter blue
+            'accent': colors.HexColor("#F39C12"),       # Warning orange
+            'success': colors.HexColor("#27AE60"),      # Success green
+            'text_primary': colors.HexColor("#2C3E50"), # Dark blue-gray
+            'text_secondary': colors.HexColor("#7F8C8D"), # Medium gray
+            'background': colors.HexColor("#F8F9FA"),   # Light gray
+            'border': colors.HexColor("#E9ECEF"),       # Border gray
+            'white': colors.white,
+            'danger': colors.HexColor("#E74C3C")        # Red for alerts
+        }
+
+    def _setup_styles(self):
+        """Create comprehensive paragraph styles"""
+        base_styles = getSampleStyleSheet()
+        self.styles = {
+            'title': ParagraphStyle(
+                'ReportTitle',
+                parent=base_styles['Title'],
+                fontName=self.font_bold,
+                fontSize=24,
+                textColor=self.colors['primary'],
+                spaceAfter=6,
+                alignment=TA_LEFT
+            ),
+            'subtitle': ParagraphStyle(
+                'ReportSubtitle',
+                fontName=self.font_regular,
+                fontSize=12,
+                textColor=self.colors['text_secondary'],
+                spaceAfter=20,
+                alignment=TA_LEFT
+            ),
+            'section_header': ParagraphStyle(
+                'SectionHeader',
+                fontName=self.font_bold,
+                fontSize=16,
+                textColor=self.colors['primary'],
+                spaceBefore=20,
+                spaceAfter=10,
+                alignment=TA_LEFT
+            ),
+            'body': ParagraphStyle(
+                'BodyText',
+                fontName=self.font_regular,
+                fontSize=11,
+                textColor=self.colors['text_primary'],
+                leading=16,
+                spaceAfter=8,
+                alignment=TA_JUSTIFY
+            ),
+            'stat_value': ParagraphStyle(
+                'StatValue',
+                fontName=self.font_bold,
+                fontSize=20,
+                textColor=self.colors['primary'],
+                alignment=TA_CENTER,
+                spaceAfter=4
+            ),
+            'stat_label': ParagraphStyle(
+                'StatLabel',
+                fontName=self.font_regular,
+                fontSize=10,
+                textColor=self.colors['text_secondary'],
+                alignment=TA_CENTER
+            ),
+            'caption': ParagraphStyle(
+                'Caption',
+                fontName=self.font_bold,
+                fontSize=10,
+                textColor=self.colors['text_primary'],
+                alignment=TA_CENTER,
+                spaceAfter=8,
+                spaceBefore=8
+            ),
+            'disclaimer': ParagraphStyle(
+                'Disclaimer',
+                fontName=self.font_regular,
+                fontSize=9,
+                textColor=self.colors['text_secondary'],
+                leading=12,
+                leftIndent=20,
+                rightIndent=20,
+                spaceAfter=10,
+                spaceBefore=10
+            ),
+            'metadata_label': ParagraphStyle(
+                'MetadataLabel',
+                fontName=self.font_bold,
+                fontSize=10,
+                textColor=self.colors['text_primary']
+            ),
+            'metadata_value': ParagraphStyle(
+                'MetadataValue',
+                fontName=self.font_regular,
+                fontSize=10,
+                textColor=self.colors['text_primary']
+            )
+        }
+
+    def _add_header_footer(self, canvas, doc):
+        """Add professional header and footer"""
+        canvas.saveState()
+        
+        # Header
+        header_y = doc.pagesize[1] - 0.75 * inch
+        
+        # Try to add logo
+        logo_path = 'assets/logo.png'
+        try:
+            if os.path.exists(logo_path):
+                canvas.drawImage(logo_path, 0.75 * inch, header_y, 
+                               width=0.5 * inch, height=0.5 * inch, 
+                               preserveAspectRatio=True, mask='auto')
+        except Exception:
+            pass  # Logo is optional
+        
+        # Header text
+        canvas.setFont(self.font_bold, 14)
+        canvas.setFillColor(self.colors['primary'])
+        canvas.drawString(1.5 * inch, header_y + 0.15 * inch, "AI Medical Diagnostic Report")
+        
+        # Header line
+        canvas.setStrokeColor(self.colors['border'])
+        canvas.setLineWidth(1)
+        canvas.line(0.75 * inch, header_y - 0.1 * inch, 
+                   doc.pagesize[0] - 0.75 * inch, header_y - 0.1 * inch)
+        
+        # Footer
+        footer_y = 0.5 * inch
+        canvas.setFont(self.font_regular, 8)
+        canvas.setFillColor(self.colors['text_secondary'])
+        canvas.drawString(0.75 * inch, footer_y, 
+                         "Med-GEMMA-3 | Confidential Medical Report | For Professional Use Only")
+        canvas.drawRightString(doc.pagesize[0] - 0.75 * inch, footer_y, 
+                              f"Page {doc.page}")
+        
+        canvas.restoreState()
+
+    def _create_stat_card(self, value, label, color_key='primary'):
+        """Create a professional statistics card"""
+        card_style = TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), self.colors['background']),
+            ('BOX', (0, 0), (-1, -1), 2, self.colors[color_key]),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('PADDING', (0, 0), (-1, -1), 15),
+            ('TOPPADDING', (0, 0), (-1, 0), 20),
+            ('BOTTOMPADDING', (0, 1), (-1, 1), 20),
+        ])
+        
+        # Modify style for value text color
+        value_style = ParagraphStyle(
+            'StatValue',
+            parent=self.styles['stat_value'],
+            textColor=self.colors[color_key]
+        )
+        
+        data = [
+            [Paragraph(str(value), value_style)],
+            [Paragraph(label, self.styles['stat_label'])]
+        ]
+        
+        table = Table(data, colWidths=[2.5 * inch])
+        table.setStyle(card_style)
+        return table
+
+    def _create_metadata_table(self, analysis_response):
+        """Create a clean metadata table"""
+        metadata = analysis_response.image_metadata
+        
+        # Format source display
+        source = metadata.get('filename') or str(metadata.get('url', 'N/A'))
+        if len(source) > 50:
+            source = source[:47] + '...'
+        
+        # Format timestamp
+        try:
+            timestamp = datetime.fromisoformat(analysis_response.timestamp)
+            formatted_time = timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')
+        except:
+            formatted_time = analysis_response.timestamp
+        
+        # Format dimensions
+        dimensions = metadata.get('dimensions', ['N/A', 'N/A'])
+        dimension_str = f"{dimensions[0]} × {dimensions[1]} pixels"
+        
+        data = [
+            ['Analysis ID:', analysis_response.analysis_id],
+            ['Generated:', formatted_time],
+            ['Image Source:', source],
+            ['Dimensions:', dimension_str],
+            ['File Size:', f"{metadata.get('file_size', 'N/A')} bytes" if metadata.get('file_size') else 'N/A']
+        ]
+        
+        # Style the data
+        styled_data = []
+        for row in data:
+            styled_row = [
+                Paragraph(row[0], self.styles['metadata_label']),
+                Paragraph(str(row[1]), self.styles['metadata_value'])
+            ]
+            styled_data.append(styled_row)
+        
+        table = Table(styled_data, colWidths=[1.5 * inch, None])
+        table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('PADDING', (0, 0), (-1, -1), 8),
+            ('LINEBELOW', (0, 0), (-1, -2), 0.5, self.colors['border']),
+            ('LEFTPADDING', (0, 0), (0, -1), 0),
+        ]))
+        
+        return table
+
+    def _pil_to_reportlab_image(self, pil_image, max_width=None, max_height=None):
+        """Convert PIL image to ReportLab image with size constraints"""
+        # Convert to RGB if necessary
+        if pil_image.mode != 'RGB':
+            pil_image = pil_image.convert('RGB')
+        
+        # Save to bytes buffer
+        img_buffer = io.BytesIO()
+        pil_image.save(img_buffer, format='PNG', optimize=True)
+        img_buffer.seek(0)
+        
+        # Calculate dimensions
+        original_width, original_height = pil_image.size
+        aspect_ratio = original_width / original_height
+        
+        if max_width and max_height:
+            if aspect_ratio > 1:  # Landscape
+                width = min(max_width, max_height * aspect_ratio)
+                height = width / aspect_ratio
+            else:  # Portrait
+                height = min(max_height, max_width / aspect_ratio)
+                width = height * aspect_ratio
+        elif max_width:
+            width = max_width
+            height = width / aspect_ratio
+        elif max_height:
+            height = max_height
+            width = height * aspect_ratio
+        else:
+            width, height = original_width, original_height
+        
+        return ReportLabImage(img_buffer, width=width, height=height)
+
+    def generate_pdf_report(self, analysis_response, original_image: Image.Image, heatmap_image: Image.Image) -> str:
+        """Generate a professional PDF medical report"""
+        
+        # Create filename and filepath
+        filename = f"medical_report_{analysis_response.analysis_id}.pdf"
+        filepath = os.path.join(self.reports_dir, filename)
+        
+        # Create document with proper margins
+        doc = SimpleDocTemplate(
+            filepath,
+            pagesize=letter,
+            rightMargin=0.75 * inch,
+            leftMargin=0.75 * inch,
+            topMargin=1.25 * inch,
+            bottomMargin=0.75 * inch
+        )
+        
+        # Story elements
+        story = []
+        findings = analysis_response.findings
+        
+        # === PAGE 1: ANALYSIS SUMMARY ===
+        
+        # Title and subtitle
+        story.append(Paragraph("Pneumothorax Detection Analysis", self.styles['title']))
+        story.append(Paragraph(
+            f"Comprehensive AI-powered diagnostic report with confidence assessment",
+            self.styles['subtitle']
+        ))
+        
+        # Key statistics in cards
+        confidence_color = 'success' if findings.confidence_level.upper() in ['HIGH', 'VERY HIGH'] else 'accent'
+        impression_color = 'danger' if 'POSITIVE' in findings.impression.upper() else 'success'
+        
+        stat_cards = [
+            self._create_stat_card(findings.impression.title(), "Clinical Impression", impression_color),
+            self._create_stat_card(findings.confidence_level.title(), "AI Confidence", confidence_color)
+        ]
+        
+        # Arrange cards side by side
+        card_table = Table([stat_cards], colWidths=[2.75 * inch, 2.75 * inch])
+        card_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 10),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+        ]))
+        story.append(card_table)
+        story.append(Spacer(1, 20))
+        
+        # Analysis Details Section
+        story.append(Paragraph("Analysis Details", self.styles['section_header']))
+        story.append(self._create_metadata_table(analysis_response))
+        story.append(Spacer(1, 15))
+        
+        # AI Analysis Output
+        story.append(Paragraph("Detailed AI Assessment", self.styles['section_header']))
+        
+        # Clean up the raw response for better presentation
+        clean_response = analysis_response.raw_response.replace('\n\n', '<br/><br/>')
+        clean_response = clean_response.replace('\n', ' ')
+        
+        story.append(Paragraph(clean_response, self.styles['body']))
+        story.append(Spacer(1, 20))
+        
+        # Professional Disclaimer
+        story.append(Paragraph("Medical Disclaimer", self.styles['section_header']))
+        disclaimer_text = """
+        <b>IMPORTANT MEDICAL NOTICE:</b> This report contains AI-generated analysis for informational and educational purposes only. 
+        This analysis is <b>NOT a substitute for professional medical diagnosis, treatment, or advice</b> from qualified healthcare professionals. 
+        
+        <br/><br/>
+        
+        <b>Clinical Limitations:</b> AI models may produce false positives or miss critical findings. All diagnostic decisions must be made by 
+        licensed medical professionals after thorough clinical correlation, patient history review, and appropriate additional testing.
+        
+        <br/><br/>
+        
+        <b>Regulatory Notice:</b> This tool is not FDA-approved for clinical diagnosis. Use only as a supplementary aid in conjunction with 
+        professional medical evaluation.
+        """
+        
+        story.append(Paragraph(disclaimer_text, self.styles['disclaimer']))
+        
+        # === PAGE 2: VISUAL ANALYSIS ===
+        story.append(PageBreak())
+        
+        story.append(Paragraph("Visual Analysis & Interpretation", self.styles['title']))
+        story.append(Paragraph(
+            "Comparative visualization showing original medical image alongside AI attention heatmap. "
+            "Warmer colors (red/yellow) indicate areas of higher model attention and potential diagnostic significance.",
+            self.styles['subtitle']
+        ))
+        
+        # Convert images for ReportLab
+        max_img_width = 3.25 * inch
+        rl_original = self._pil_to_reportlab_image(original_image, max_width=max_img_width)
+        rl_heatmap = self._pil_to_reportlab_image(heatmap_image, max_width=max_img_width)
+        
+        # Create image comparison table
+        image_data = [
+            [rl_original, rl_heatmap],
+            [
+                Paragraph("Original Medical Image", self.styles['caption']),
+                Paragraph("AI Attention Heatmap", self.styles['caption'])
+            ]
+        ]
+        
+        image_table = Table(image_data, colWidths=[3.5 * inch, 3.5 * inch])
+        image_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('PADDING', (0, 0), (-1, -1), 10),
+            ('BOX', (0, 0), (1, 0), 1, self.colors['border']),
+            ('BACKGROUND', (0, 1), (-1, 1), self.colors['background']),
+        ]))
+        
+        story.append(image_table)
+        story.append(Spacer(1, 20))
+        
+        # Technical Details
+        story.append(Paragraph("Technical Analysis Notes", self.styles['section_header']))
+        
+        tech_notes = """
+        <b>Heatmap Interpretation:</b> The AI attention heatmap visualizes regions where the neural network focused during analysis. 
+        Areas with higher intensity (warmer colors) received more computational attention and may correlate with diagnostic features.
+        
+        <br/><br/>
+        
+        <b>Model Confidence:</b> The confidence level reflects the model's certainty in its prediction based on learned patterns from training data. 
+        Higher confidence does not guarantee diagnostic accuracy and should be interpreted alongside clinical findings.
+        
+        <br/><br/>
+        
+        <b>Quality Assurance:</b> Ensure image quality meets diagnostic standards. Poor image quality, artifacts, or positioning may affect AI performance.
+        """
+        
+        story.append(Paragraph(tech_notes, self.styles['body']))
+        
+        # Build the PDF
+        try:
+            doc.build(story, onFirstPage=self._add_header_footer, onLaterPages=self._add_header_footer)
+            logger.info(f"Premium PDF report successfully generated: {filepath}")
+            return filepath
+        except Exception as e:
+            logger.error(f"Failed to generate PDF report: {str(e)}")
+            raise
+
     def ensure_reports_directory(self) -> None:
         """
         Ensure the reports directory exists for PDF storage.
@@ -586,210 +1007,6 @@ class MedicalImageAnalyzer:
         heatmap = np.clip(heatmap, 0.3, 0.7)  # Keep it subtle
         
         return self._create_heatmap_overlay(heatmap, original_image)
-    
-    def generate_pdf_report(self, analysis_response: AnalysisResponse, original_image: Image.Image, heatmap_image: Image.Image) -> str:
-        """
-        Generates a premium, professionally designed PDF medical report with a robust,
-        multi-frame layout to ensure perfect alignment and a polished aesthetic.
-        """
-        # --- 1. SETUP & INITIALIZATION ---
-        filename = f"medical_report_{analysis_response.analysis_id}.pdf"
-        filepath = os.path.join(self.reports_dir, filename)
-
-        # A. Register custom fonts
-        try:
-            pdfmetrics.registerFont(TTFont('Roboto', 'assets/Roboto-Regular.ttf'))
-            pdfmetrics.registerFont(TTFont('Roboto-Bold', 'assets/Roboto-Bold.ttf'))
-        except Exception:
-            logger.warning("Roboto font not found in assets/. Falling back to Helvetica.")
-            pdfmetrics.registerFont(TTFont('Roboto', 'Helvetica'))
-            pdfmetrics.registerFont(TTFont('Roboto-Bold', 'Helvetica-Bold'))
-
-        # B. Define Professional Color Palette
-        primary_color = colors.HexColor("#0D47A1")
-        secondary_color = colors.HexColor("#1976D2")
-        text_color = colors.HexColor("#212121")
-        light_text_color = colors.HexColor("#757575")
-        card_bg_color = colors.white
-        divider_color = colors.HexColor("#E0E0E0")
-
-        # C. Define Styles
-        styles = getSampleStyleSheet()
-        styles['BodyText'].fontName = 'Roboto'
-        styles['BodyText'].fontSize = 10.5
-        styles['BodyText'].textColor = text_color
-        styles['BodyText'].leading = 15
-
-        styles.add(ParagraphStyle(name='ReportTitle', fontName='Roboto-Bold', fontSize=22, textColor=primary_color, spaceAfter=4))
-        styles.add(ParagraphStyle(name='ReportSubtitle', fontName='Roboto', fontSize=11, textColor=light_text_color, spaceAfter=20))
-        styles.add(ParagraphStyle(name='SectionTitle', fontName='Roboto-Bold', fontSize=14, textColor=primary_color, spaceBefore=12, spaceAfter=8))
-        styles.add(ParagraphStyle(name='StatValue', fontName='Roboto-Bold', fontSize=24, textColor=primary_color, alignment=TA_CENTER))
-        styles.add(ParagraphStyle(name='StatLabel', fontName='Roboto', fontSize=10, textColor=light_text_color, alignment=TA_CENTER))
-        styles.add(ParagraphStyle(name='ImageCaption', fontName='Roboto-Bold', fontSize=10, textColor=text_color, alignment=TA_CENTER, spaceBefore=6))
-        styles.add(ParagraphStyle(name='DisclaimerText', parent=styles['BodyText'], textColor=light_text_color, fontSize=9))
-        
-        # --- 2. DOCUMENT & PAGE TEMPLATE (MULTI-FRAME APPROACH) ---
-        doc = BaseDocTemplate(filepath, pagesize=letter)
-
-        # NEW: Define separate Frames for header, body, and footer
-        # This robustly prevents any overlap between sections.
-        margin = 0.75 * inch
-        header_height = 0.75 * inch
-        footer_height = 0.5 * inch
-
-        # Frame for the main body content on the page
-        body_frame = Frame(
-            margin,
-            margin + footer_height,
-            doc.width - 2 * margin,
-            doc.height - 2 * margin - header_height - footer_height,
-            id='body_frame'
-        )
-        # Frame for the header content
-        header_frame = Frame(
-            margin,
-            doc.height - margin - header_height,
-            doc.width - 2 * margin,
-            header_height,
-            id='header_frame'
-        )
-        # Frame for the footer content
-        footer_frame = Frame(
-            margin,
-            margin,
-            doc.width - 2 * margin,
-            footer_height,
-            id='footer_frame'
-        )
-        
-        # NEW: Create a PageTemplate that uses these three frames
-        # The 'onPage' argument is now used to *draw content into these frames*
-        def on_page(canvas, doc):
-            # This function is called for each page.
-            # It adds static content to the header and footer frames.
-            
-            # Header Content
-            canvas.saveState()
-            logo_path = 'assets/logo.png'
-            try:
-                logo = ImageReader(logo_path)
-                # Draw logo and title within the header_frame's coordinate space
-                canvas.drawImage(logo, header_frame.x1, header_frame.y1 + 5, width=0.5*inch, height=0.5*inch, preserveAspectRatio=True, mask='auto')
-            except Exception:
-                pass # Logo is optional
-            
-            canvas.setFont('Roboto-Bold', 14)
-            canvas.setFillColor(primary_color)
-            canvas.drawString(header_frame.x1 + 0.6*inch, header_frame.y1 + 15, "AI Diagnostic Report")
-            canvas.setStrokeColor(divider_color)
-            canvas.line(header_frame.x1, header_frame.y1, header_frame.x1 + header_frame.width, header_frame.y1)
-            canvas.restoreState()
-            
-            # Footer Content
-            canvas.saveState()
-            canvas.setFont('Roboto', 8)
-            canvas.setFillColor(light_text_color)
-            canvas.drawString(footer_frame.x1, footer_frame.y1 + 5, "Med-GEMMA-3 | Confidential & For Informational Purposes Only")
-            canvas.drawRightString(footer_frame.x1 + footer_frame.width, footer_frame.y1 + 5, f"Page {doc.page}")
-            canvas.restoreState()
-
-        # Apply the multi-frame template to the document
-        template = PageTemplate(id='main_template', frames=[body_frame], onPage=on_page)
-        doc.addPageTemplates([template])
-        
-        story = []
-        findings = analysis_response.findings
-
-        # --- 3. PAGE 1 CONTENT ---
-        story.append(Paragraph("Pneumothorax Detection Analysis", styles['ReportTitle']))
-        story.append(Paragraph(f"Analysis ID: {analysis_response.analysis_id}  |  Generated: {datetime.fromisoformat(analysis_response.timestamp).strftime('%Y-%m-%d %H:%M:%S')}", styles['ReportSubtitle']))
-
-        # REVISED: Stat Cards - A much simpler and more robust single table
-        # This completely fixes the overlapping text issue.
-        stat_data = [
-            [Paragraph(findings.impression.upper(), styles['StatValue']), Paragraph(findings.confidence_level, styles['StatValue'])],
-            [Paragraph("Clinical Impression", styles['StatLabel']), Paragraph("AI Confidence Level", styles['StatLabel'])]
-        ]
-        stat_table = Table(stat_data, colWidths=['50%', '50%'])
-        stat_table.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,-1), colors.HexColor("#F8F9FA")),
-            ('BOX', (0,0), (-1,-1), 1, divider_color),
-            ('INNERGRID', (0,0), (-1,-1), 1, divider_color),
-            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-            ('PADDING', (0,0), (-1,-1), 12),
-        ]))
-        story.append(stat_table)
-
-        # Analysis Details Card
-        story.append(Paragraph("Analysis Details", styles['SectionTitle']))
-        metadata = analysis_response.image_metadata
-        source_display = (metadata.get('filename') or str(metadata.get('url', 'N/A')))
-        if len(source_display) > 60: source_display = source_display[:57] + '...'
-        
-        meta_data = [
-            ['Analysis ID', analysis_response.analysis_id],
-            ['Timestamp', analysis_response.timestamp],
-            ['Image Source', source_display],
-            ['Image Dimensions', f"{metadata.get('dimensions')[0]} x {metadata.get('dimensions')[1]} px"]
-        ]
-        # Wrap strings in Paragraphs for consistent styling
-        styled_meta_data = [[Paragraph(f"<b>{row[0]}</b>", styles['BodyText']), Paragraph(row[1], styles['BodyText'])] for row in meta_data]
-
-        meta_table = Table(styled_meta_data, colWidths=[1.7*inch, None], spaceAfter=12)
-        meta_table.setStyle(TableStyle([
-            ('VALIGN', (0,0), (-1,-1), 'TOP'),
-            ('LINEBELOW', (0,0), (-1,-2), 0.5, divider_color),
-            ('PADDING', (0,0), (-1,-1), 6),
-            ('LEFTPADDING', (0,0), (-1,-1), 0),
-            ('RIGHTPADDING', (0,0), (-1,-1), 0),
-        ]))
-        story.append(meta_table)
-
-        # Detailed AI Output Card
-        story.append(Paragraph("Detailed AI Output", styles['SectionTitle']))
-        story.append(Paragraph(analysis_response.raw_response.replace('\n', '<br/>'), styles['BodyText']))
-        
-        # Disclaimer
-        story.append(Paragraph("Disclaimer", styles['SectionTitle']))
-        disclaimer_text = (
-            "<b>IMPORTANT:</b> This report was generated by an AI model and is intended for informational "
-            "purposes only. It is <b>not a substitute</b> for professional medical advice, diagnosis, or "
-            "treatment from a qualified human expert. Clinical decisions should only be made after "
-            "correlation with patient history and review by a certified radiologist."
-        )
-        story.append(Paragraph(disclaimer_text, styles['DisclaimerText']))
-        
-        # --- 4. PAGE 2 CONTENT ---
-        story.append(PageBreak())
-
-        story.append(Paragraph("Visual Analysis", styles['ReportTitle']))
-        story.append(Paragraph("Side-by-side comparison of the original scan and an AI-generated heatmap. Brighter areas (red, yellow) indicate a higher level of model attention.", styles['ReportSubtitle']))
-
-        def pil_to_rl_image(img, width):
-            img_buffer = io.BytesIO()
-            img.save(img_buffer, format='PNG')
-            img_buffer.seek(0)
-            return ReportLabImage(img_buffer, width=width, height=width, kind='proportional')
-
-        img_width = (doc.width - 2 * margin - 0.2*inch) / 2
-        rl_original_image = pil_to_rl_image(original_image, img_width)
-        rl_heatmap_image = pil_to_rl_image(heatmap_image, img_width)
-
-        image_table_data = [
-            [rl_original_image, rl_heatmap_image],
-            [Paragraph("Original Image", styles['ImageCaption']), Paragraph("AI Heatmap Overlay", styles['ImageCaption'])]
-        ]
-        image_table = Table(image_table_data, colWidths=[img_width + 0.1*inch, img_width + 0.1*inch])
-        image_table.setStyle(TableStyle([
-            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-            ('VALIGN', (0,0), (-1,-1), 'TOP'),
-        ]))
-        story.append(image_table)
-
-        # --- 5. BUILD THE PDF ---
-        doc.build(story)
-        logger.info(f"Premium PDF report generated with corrected layout: {filepath}")
-        return filepath
 
     async def analyze_image_from_upload(self, file: UploadFile) -> tuple[AnalysisResponse, Image.Image, Image.Image]:
         """
