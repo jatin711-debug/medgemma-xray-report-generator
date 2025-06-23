@@ -621,22 +621,19 @@ class MedicalImageAnalyzer:
         secondary_color = colors.HexColor("#1976D2") # Bright Blue for accents
         text_color = colors.HexColor("#212121")    # Dark Grey for body text
         light_text_color = colors.HexColor("#757575") # Lighter Grey for sub-info
-        bg_color = colors.HexColor("#F5F5F5")      # Very light grey for page background
         card_bg_color = colors.white
         divider_color = colors.HexColor("#E0E0E0")
 
         # C. Custom Styles using Roboto
         styles = getSampleStyleSheet()
 
-        # --- FIX: Modify existing default styles instead of re-adding them ---
         body_text_style = styles['BodyText']
         body_text_style.fontName = 'Roboto'
         body_text_style.fontSize = 11
         body_text_style.textColor = text_color
-        body_text_style.leading = 15 # Slightly increased for better readability
+        body_text_style.leading = 15 
         body_text_style.spaceAfter = 12
 
-        # Add completely new, custom styles that don't conflict with defaults
         styles.add(ParagraphStyle(name='ReportTitle', fontName='Roboto-Bold', fontSize=26, textColor=primary_color, spaceAfter=4))
         styles.add(ParagraphStyle(name='ReportSubtitle', fontName='Roboto', fontSize=12, textColor=light_text_color, spaceAfter=24))
         styles.add(ParagraphStyle(name='SectionTitle', fontName='Roboto-Bold', fontSize=14, textColor=primary_color, spaceAfter=12, keepWithNext=1, borderBottomWidth=2, borderBottomColor=secondary_color, paddingBottom=4))
@@ -645,8 +642,6 @@ class MedicalImageAnalyzer:
         styles.add(ParagraphStyle(name='ImageCaption', fontName='Roboto-Bold', fontSize=10, textColor=text_color, alignment=TA_CENTER))
         
         # --- 2. DOCUMENT & PAGE TEMPLATE DEFINITION ---
-
-        # A. Create a BaseDocTemplate for advanced control
         doc = BaseDocTemplate(filepath, pagesize=letter,
                               rightMargin=0.75*inch, leftMargin=0.75*inch,
                               topMargin=1.25*inch, bottomMargin=1.0*inch)
@@ -654,7 +649,8 @@ class MedicalImageAnalyzer:
         # B. Define the header/footer drawing function
         def header_footer(canvas, doc):
             canvas.saveState()
-            # Header
+            
+            # --- Header ---
             logo_path = 'assets/logo.png'
             try:
                 logo = ImageReader(logo_path)
@@ -665,14 +661,23 @@ class MedicalImageAnalyzer:
             canvas.setFont('Roboto-Bold', 16)
             canvas.setFillColor(primary_color)
             canvas.drawString(doc.leftMargin + 0.8*inch, doc.height + doc.topMargin - 0.55*inch, "AI Diagnostic Report")
-            canvas.line(doc.leftMargin, doc.height + doc.topMargin - 0.9*inch, doc.width + doc.leftMargin, doc.height + doc.topMargin - 0.9*inch, color=divider_color)
+            
+            # --- FIX: Set the line color and width BEFORE drawing the line ---
+            canvas.setStrokeColor(divider_color)
+            canvas.setLineWidth(1)
+            canvas.line(doc.leftMargin, doc.height + doc.topMargin - 0.9*inch, doc.width + doc.leftMargin, doc.height + doc.topMargin - 0.9*inch)
 
-            # Footer
+            # --- Footer ---
             canvas.setFont('Roboto', 9)
-            canvas.setFillColor(light_text_color)
+            canvas.setFillColor(light_text_color) # setFillColor for text
             canvas.drawString(doc.leftMargin, 0.5*inch, "Med-GEMMA-3 | Confidential & For Informational Purposes Only")
             canvas.drawRightString(doc.width + doc.leftMargin, 0.5*inch, f"Page {doc.page}")
-            canvas.line(doc.leftMargin, 0.75*inch, doc.width + doc.leftMargin, 0.75*inch, color=divider_color)
+
+            # --- FIX: Set the line color and width again for the footer line ---
+            canvas.setStrokeColor(divider_color) # Redundant but safe
+            canvas.setLineWidth(1)
+            canvas.line(doc.leftMargin, 0.75*inch, doc.width + doc.leftMargin, 0.75*inch)
+            
             canvas.restoreState()
         
         # C. Create and add the PageTemplate to the document
