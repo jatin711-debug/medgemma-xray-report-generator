@@ -587,213 +587,229 @@ class MedicalImageAnalyzer:
         
         return self._create_heatmap_overlay(heatmap, original_image)
 
-
     def generate_pdf_report(self, analysis_response: AnalysisResponse, original_image: Image.Image, heatmap_image: Image.Image) -> str:
-            """
-            Generates a premium, professionally designed PDF medical report inspired by
-            modern tech design principles (e.g., Google, Uber).
+        """
+        Generates a premium, professionally designed PDF medical report inspired by
+        modern tech design principles (e.g., Google, Uber).
 
-            This report features:
-            - Custom "Roboto" font for a clean, modern aesthetic.
-            - A branded, persistent header and footer on every page.
-            - A "card"-based layout for clear information segmentation.
-            - High-impact "stat cards" for key findings.
-            - A visually appealing, easy-to-read data table.
-            - Advanced layout management using ReportLab PageTemplates.
-            """
-            # --- 1. SETUP & INITIALIZATION ---
-            filename = f"medical_report_{analysis_response.analysis_id}.pdf"
-            filepath = os.path.join(self.reports_dir, filename)
+        This report features:
+        - Custom "Roboto" font for a clean, modern aesthetic.
+        - A branded, persistent header and footer on every page.
+        - A "card"-based layout for clear information segmentation.
+        - High-impact "stat cards" for key findings.
+        - A visually appealing, easy-to-read data table.
+        - Advanced layout management using ReportLab PageTemplates.
+        """
+        # --- 1. SETUP & INITIALIZATION ---
+        filename = f"medical_report_{analysis_response.analysis_id}.pdf"
+        filepath = os.path.join(self.reports_dir, filename)
 
-            # A. Register custom fonts (ensure assets folder is set up)
-            try:
-                pdfmetrics.registerFont(TTFont('Roboto', 'assets/Roboto-Regular.ttf'))
-                pdfmetrics.registerFont(TTFont('Roboto-Bold', 'assets/Roboto-Bold.ttf'))
-                pdfmetrics.registerFont(TTFont('Roboto-Italic', 'assets/Roboto-Italic.ttf'))
-            except Exception:
-                # Fallback to default fonts if assets are missing
-                logger.warning("Roboto font not found in assets/. Falling back to Helvetica.")
-                pdfmetrics.registerFont(TTFont('Roboto', 'Helvetica'))
-                pdfmetrics.registerFont(TTFont('Roboto-Bold', 'Helvetica-Bold'))
-                pdfmetrics.registerFont(TTFont('Roboto-Italic', 'Helvetica-Oblique'))
+        # A. Register custom fonts (ensure assets folder is set up)
+        try:
+            pdfmetrics.registerFont(TTFont('Roboto', 'assets/Roboto-Regular.ttf'))
+            pdfmetrics.registerFont(TTFont('Roboto-Bold', 'assets/Roboto-Bold.ttf'))
+            pdfmetrics.registerFont(TTFont('Roboto-Italic', 'assets/Roboto-Italic.ttf'))
+        except Exception:
+            # Fallback to default fonts if assets are missing
+            logger.warning("Roboto font not found in assets/. Falling back to Helvetica.")
+            pdfmetrics.registerFont(TTFont('Roboto', 'Helvetica'))
+            pdfmetrics.registerFont(TTFont('Roboto-Bold', 'Helvetica-Bold'))
+            pdfmetrics.registerFont(TTFont('Roboto-Italic', 'Helvetica-Oblique'))
 
-            # B. Define Professional Color Palette
-            primary_color = colors.HexColor("#0D47A1")  # Darker Blue for titles
-            secondary_color = colors.HexColor("#1976D2") # Bright Blue for accents
-            text_color = colors.HexColor("#212121")    # Dark Grey for body text
-            light_text_color = colors.HexColor("#757575") # Lighter Grey for sub-info
-            bg_color = colors.HexColor("#F5F5F5")      # Very light grey for page background
-            card_bg_color = colors.white
-            divider_color = colors.HexColor("#E0E0E0")
+        # B. Define Professional Color Palette
+        primary_color = colors.HexColor("#0D47A1")  # Darker Blue for titles
+        secondary_color = colors.HexColor("#1976D2") # Bright Blue for accents
+        text_color = colors.HexColor("#212121")    # Dark Grey for body text
+        light_text_color = colors.HexColor("#757575") # Lighter Grey for sub-info
+        bg_color = colors.HexColor("#F5F5F5")      # Very light grey for page background
+        card_bg_color = colors.white
+        divider_color = colors.HexColor("#E0E0E0")
 
-            # C. Custom Styles using Roboto
-            styles = getSampleStyleSheet()
-            styles.add(ParagraphStyle(name='ReportTitle', fontName='Roboto-Bold', fontSize=26, textColor=primary_color, spaceAfter=4))
-            styles.add(ParagraphStyle(name='ReportSubtitle', fontName='Roboto', fontSize=12, textColor=light_text_color, spaceAfter=24))
-            styles.add(ParagraphStyle(name='SectionTitle', fontName= 'Roboto-Bold', fontSize=14, textColor=primary_color, spaceAfter=12, keepWithNext=1, borderBottomWidth=2, borderBottomColor=secondary_color, paddingBottom=4))
-            styles.add(ParagraphStyle(name='BodyText', fontName='Roboto', fontSize=11, textColor=text_color, leading=14, spaceAfter=12))
-            styles.add(ParagraphStyle(name='StatValue', fontName='Roboto-Bold', fontSize=28, textColor=primary_color, alignment=TA_CENTER))
-            styles.add(ParagraphStyle(name='StatLabel', fontName='Roboto', fontSize=10, textColor=light_text_color, alignment=TA_CENTER))
-            styles.add(ParagraphStyle(name='ImageCaption', fontName='Roboto-Bold', fontSize=10, textColor=text_color, alignment=TA_CENTER))
+        # C. Custom Styles using Roboto
+        styles = getSampleStyleSheet()
 
-            # --- 2. DOCUMENT & PAGE TEMPLATE DEFINITION ---
+        # --- FIX: Modify existing default styles instead of re-adding them ---
+        body_text_style = styles['BodyText']
+        body_text_style.fontName = 'Roboto'
+        body_text_style.fontSize = 11
+        body_text_style.textColor = text_color
+        body_text_style.leading = 15 # Slightly increased for better readability
+        body_text_style.spaceAfter = 12
 
-            # A. Create a BaseDocTemplate for advanced control
-            doc = BaseDocTemplate(filepath, pagesize=letter,
-                                rightMargin=0.75*inch, leftMargin=0.75*inch,
-                                topMargin=1.25*inch, bottomMargin=1.0*inch)
-
-            # B. Define the header/footer drawing function
-            def header_footer(canvas, doc):
-                canvas.saveState()
-                # Header
-                logo_path = 'assets/logo.png'
-                try:
-                    logo = ImageReader(logo_path)
-                    canvas.drawImage(logo, doc.leftMargin, doc.height + doc.topMargin - 0.7*inch, width=0.6*inch, height=0.6*inch, preserveAspectRatio=True, mask='auto')
-                except Exception:
-                    logger.warning("logo.png not found in assets/.")
-                
-                canvas.setFont('Roboto-Bold', 16)
-                canvas.setFillColor(primary_color)
-                canvas.drawString(doc.leftMargin + 0.8*inch, doc.height + doc.topMargin - 0.55*inch, "AI Diagnostic Report")
-                canvas.line(doc.leftMargin, doc.height + doc.topMargin - 0.9*inch, doc.width + doc.leftMargin, doc.height + doc.topMargin - 0.9*inch, color=divider_color)
-
-                # Footer
-                canvas.setFont('Roboto', 9)
-                canvas.setFillColor(light_text_color)
-                canvas.drawString(doc.leftMargin, 0.5*inch, "Med-GEMMA-3 | Confidential & For Informational Purposes Only")
-                canvas.drawRightString(doc.width + doc.leftMargin, 0.5*inch, f"Page {doc.page}")
-                canvas.line(doc.leftMargin, 0.75*inch, doc.width + doc.leftMargin, 0.75*inch, color=divider_color)
-                canvas.restoreState()
-            
-            # C. Create and add the PageTemplate to the document
-            main_frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id='main_frame')
-            main_template = PageTemplate(id='main_template', frames=[main_frame], onPage=header_footer)
-            doc.addPageTemplates([main_template])
-            
-            # --- 3. HELPER FUNCTIONS FOR CREATING "CARDS" ---
-            def create_card(title, content_flowable, title_style='SectionTitle', padding=12):
-                card_style = TableStyle([
-                    ('BACKGROUND', (0, 0), (-1, -1), card_bg_color),
-                    ('BOX', (0, 0), (-1, -1), 1, divider_color),
-                    ('TOPPADDING', (0, 0), (-1, -1), padding),
-                    ('BOTTOMPADDING', (0, 0), (-1, -1), padding),
-                    ('LEFTPADDING', (0, 0), (-1, -1), padding),
-                    ('RIGHTPADDING', (0, 0), (-1, -1), padding),
-                ])
-                
-                if title:
-                    card_content = [[Paragraph(title, styles[title_style])], [content_flowable]]
-                    tbl = Table(card_content, colWidths='100%')
-                else:
-                    card_content = [[content_flowable]]
-                    tbl = Table(card_content, colWidths='100%')
-
-                tbl.setStyle(card_style)
-                return tbl
-            
-            def create_stat_card(label, value, icon_path=None):
-                content = [
-                    Paragraph(value, styles['StatValue']),
-                    Spacer(1, 4),
-                    Paragraph(label, styles['StatLabel'])
-                ]
-                return Table([[content]], colWidths='100%')
-                
-            # --- 4. BUILD THE STORY (DOCUMENT CONTENT) ---
-            story = []
-            findings = analysis_response.findings
-
-            # A. Top-level title and subtitle
-            story.append(Paragraph("Pneumothorax Detection Analysis", styles['ReportTitle']))
-            story.append(Paragraph(f"Analysis ID: {analysis_response.analysis_id}  |  Generated: {datetime.fromisoformat(analysis_response.timestamp).strftime('%Y-%m-%d %H:%M:%S')}", styles['ReportSubtitle']))
-
-            # B. High-Impact Stat Cards
-            impression_card = create_stat_card("Clinical Impression", findings.impression.upper())
-            confidence_card = create_stat_card("AI Confidence Level", findings.confidence_level)
-            
-            stats_table = Table([[impression_card, confidence_card]], colWidths=['50%', '50%'], spaceAfter=18)
-            stats_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
-            story.append(stats_table)
-            
-            # C. Analysis Details Card
-            metadata = analysis_response.image_metadata
-            meta_data = [
-                [Paragraph('<b>Analysis ID</b>', styles['BodyText']), Paragraph(analysis_response.analysis_id, styles['BodyText'])],
-                [Paragraph('<b>Timestamp</b>', styles['BodyText']), Paragraph(analysis_response.timestamp, styles['BodyText'])],
-                [Paragraph('<b>Image Source</b>', styles['BodyText']), Paragraph(metadata.get('filename') or metadata.get('url'), styles['BodyText'])],
-                [Paragraph('<b>Image Dimensions</b>', styles['BodyText']), Paragraph(f"{metadata.get('dimensions')[0]} x {metadata.get('dimensions')[1]} px", styles['BodyText'])],
-            ]
-            meta_table = Table(meta_data, colWidths=[1.5*inch, None])
-            meta_table.setStyle(TableStyle([
-                ('VALIGN', (0,0), (-1,-1), 'TOP'),
-                ('LINEBELOW', (0,0), (-1,-2), 1, divider_color),
-                ('BOTTOMPADDING', (0,0), (-1,-1), 8),
-                ('TOPPADDING', (0,0), (-1,-1), 8),
-            ]))
-            story.append(create_card("Analysis Details", meta_table))
-            story.append(Spacer(1, 18))
-
-            # D. Raw AI Response Card
-            raw_response_p = Paragraph(analysis_response.raw_response.replace('\n', '<br/>'), styles['BodyText'])
-            story.append(create_card("Detailed AI Output", raw_response_p))
-            story.append(Spacer(1, 18))
-
-            # E. Disclaimer Card
-            disclaimer_text = (
-                "<b>IMPORTANT:</b> This report was generated by an AI model and is intended for informational "
-                "purposes only. It is <b>not a substitute</b> for professional medical advice, diagnosis, or "
-                "treatment from a qualified human expert. Clinical decisions should only be made after "
-                "correlation with patient history and review by a certified radiologist."
-            )
-            disclaimer_p = Paragraph(disclaimer_text, styles['BodyText'])
-            story.append(create_card("Disclaimer", disclaimer_p, title_style='SectionTitle'))
-
-            # --- PAGE BREAK & VISUALS PAGE ---
-            story.append(PageBreak())
-            
-            # F. Visual Analysis Section
-            story.append(Paragraph("Visual Analysis", styles['SectionTitle']))
-            story.append(Paragraph(
-                "The following images provide a side-by-side comparison of the original scan "
-                "and a heatmap visualizing the areas the AI model focused on. Brighter, warmer areas (red, yellow) "
-                "indicate a higher level of AI attention.", styles['BodyText']
-            ))
-            
-            # Convert PIL images to ReportLab flowables
-            def pil_to_rl_image(img, width):
-                img_buffer = io.BytesIO()
-                img.save(img_buffer, format='PNG')
-                img_buffer.seek(0)
-                return ReportLabImage(img_buffer, width=width, height=width, kind='proportional')
-
-            rl_original_image = pil_to_rl_image(original_image, 3*inch)
-            rl_heatmap_image = pil_to_rl_image(heatmap_image, 3*inch)
-
-            image_comparison_data = [
-                [Paragraph("Original Image", styles['ImageCaption']), Paragraph("AI Heatmap Overlay", styles['ImageCaption'])],
-                [rl_original_image, rl_heatmap_image]
-            ]
-            
-            image_table = Table(image_comparison_data, colWidths=[3.25*inch, 3.25*inch], rowHeights=[None, 3*inch])
-            image_table.setStyle(TableStyle([
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                ('VALIGN', (0, 1), (-1, 1), 'TOP'),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ]))
-            story.append(create_card(None, image_table, padding=18))
-
-            # --- 5. BUILD THE PDF ---
-            try:
-                doc.build(story)
-                logger.info(f"Premium PDF report generated: {filepath}")
-                return filepath
-            except Exception as e:
-                logger.error(f"Error building PDF: {e}", exc_info=True)
-                raise
+        # Add completely new, custom styles that don't conflict with defaults
+        styles.add(ParagraphStyle(name='ReportTitle', fontName='Roboto-Bold', fontSize=26, textColor=primary_color, spaceAfter=4))
+        styles.add(ParagraphStyle(name='ReportSubtitle', fontName='Roboto', fontSize=12, textColor=light_text_color, spaceAfter=24))
+        styles.add(ParagraphStyle(name='SectionTitle', fontName='Roboto-Bold', fontSize=14, textColor=primary_color, spaceAfter=12, keepWithNext=1, borderBottomWidth=2, borderBottomColor=secondary_color, paddingBottom=4))
+        styles.add(ParagraphStyle(name='StatValue', fontName='Roboto-Bold', fontSize=28, textColor=primary_color, alignment=TA_CENTER))
+        styles.add(ParagraphStyle(name='StatLabel', fontName='Roboto', fontSize=10, textColor=light_text_color, alignment=TA_CENTER))
+        styles.add(ParagraphStyle(name='ImageCaption', fontName='Roboto-Bold', fontSize=10, textColor=text_color, alignment=TA_CENTER))
         
+        # --- 2. DOCUMENT & PAGE TEMPLATE DEFINITION ---
+
+        # A. Create a BaseDocTemplate for advanced control
+        doc = BaseDocTemplate(filepath, pagesize=letter,
+                              rightMargin=0.75*inch, leftMargin=0.75*inch,
+                              topMargin=1.25*inch, bottomMargin=1.0*inch)
+
+        # B. Define the header/footer drawing function
+        def header_footer(canvas, doc):
+            canvas.saveState()
+            # Header
+            logo_path = 'assets/logo.png'
+            try:
+                logo = ImageReader(logo_path)
+                canvas.drawImage(logo, doc.leftMargin, doc.height + doc.topMargin - 0.7*inch, width=0.6*inch, height=0.6*inch, preserveAspectRatio=True, mask='auto')
+            except Exception:
+                logger.warning("logo.png not found in assets/.")
+            
+            canvas.setFont('Roboto-Bold', 16)
+            canvas.setFillColor(primary_color)
+            canvas.drawString(doc.leftMargin + 0.8*inch, doc.height + doc.topMargin - 0.55*inch, "AI Diagnostic Report")
+            canvas.line(doc.leftMargin, doc.height + doc.topMargin - 0.9*inch, doc.width + doc.leftMargin, doc.height + doc.topMargin - 0.9*inch, color=divider_color)
+
+            # Footer
+            canvas.setFont('Roboto', 9)
+            canvas.setFillColor(light_text_color)
+            canvas.drawString(doc.leftMargin, 0.5*inch, "Med-GEMMA-3 | Confidential & For Informational Purposes Only")
+            canvas.drawRightString(doc.width + doc.leftMargin, 0.5*inch, f"Page {doc.page}")
+            canvas.line(doc.leftMargin, 0.75*inch, doc.width + doc.leftMargin, 0.75*inch, color=divider_color)
+            canvas.restoreState()
+        
+        # C. Create and add the PageTemplate to the document
+        main_frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id='main_frame')
+        main_template = PageTemplate(id='main_template', frames=[main_frame], onPage=header_footer)
+        doc.addPageTemplates([main_template])
+        
+        # --- 3. HELPER FUNCTIONS FOR CREATING "CARDS" ---
+        def create_card(title, content_flowable, title_style='SectionTitle', padding=12):
+            card_style = TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), card_bg_color),
+                ('BOX', (0, 0), (-1, -1), 1, divider_color),
+                ('TOPPADDING', (0, 0), (-1, -1), padding),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), padding),
+                ('LEFTPADDING', (0, 0), (-1, -1), padding),
+                ('RIGHTPADDING', (0, 0), (-1, -1), padding),
+                ('ROUNDEDCORNERS', (0,0), (-1,-1), 6),
+            ])
+            
+            if title:
+                card_content = [[Paragraph(title, styles[title_style])], [content_flowable]]
+                tbl = Table(card_content, colWidths='100%', rowHeights=[None, None])
+            else:
+                card_content = [[content_flowable]]
+                tbl = Table(card_content, colWidths='100%')
+
+            tbl.setStyle(card_style)
+            return tbl
+        
+        def create_stat_card(label, value, icon_path=None):
+            content = [
+                Paragraph(value, styles['StatValue']),
+                Spacer(1, 4),
+                Paragraph(label, styles['StatLabel'])
+            ]
+            return Table([[content]], colWidths='100%')
+            
+        # --- 4. BUILD THE STORY (DOCUMENT CONTENT) ---
+        story = []
+        findings = analysis_response.findings
+
+        # A. Top-level title and subtitle
+        story.append(Paragraph("Pneumothorax Detection Analysis", styles['ReportTitle']))
+        story.append(Paragraph(f"Analysis ID: {analysis_response.analysis_id}  |  Generated: {datetime.fromisoformat(analysis_response.timestamp).strftime('%Y-%m-%d %H:%M:%S')}", styles['ReportSubtitle']))
+
+        # B. High-Impact Stat Cards
+        impression_card = create_stat_card("Clinical Impression", findings.impression.upper())
+        confidence_card = create_stat_card("AI Confidence Level", findings.confidence_level)
+        
+        stats_table = Table([[impression_card, confidence_card]], colWidths=['50%', '50%'], spaceAfter=18)
+        stats_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP'), ('LEFTPADDING', (1,0), (1,0), 10), ('RIGHTPADDING', (0,0), (0,0), 10)]))
+        story.append(create_card(None, stats_table, padding=18))
+        story.append(Spacer(1, 18))
+        
+        # C. Analysis Details Card
+        metadata = analysis_response.image_metadata
+        source_display = (metadata.get('filename') or str(metadata.get('url', 'N/A')))
+        if len(source_display) > 60:
+            source_display = source_display[:57] + '...'
+
+        meta_data = [
+            [Paragraph('<b>Analysis ID</b>', styles['BodyText']), Paragraph(analysis_response.analysis_id, styles['BodyText'])],
+            [Paragraph('<b>Timestamp</b>', styles['BodyText']), Paragraph(analysis_response.timestamp, styles['BodyText'])],
+            [Paragraph('<b>Image Source</b>', styles['BodyText']), Paragraph(source_display, styles['BodyText'])],
+            [Paragraph('<b>Image Dimensions</b>', styles['BodyText']), Paragraph(f"{metadata.get('dimensions')[0]} x {metadata.get('dimensions')[1]} px", styles['BodyText'])],
+        ]
+        meta_table = Table(meta_data, colWidths=[1.5*inch, None])
+        meta_table.setStyle(TableStyle([
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ('LINEABOVE', (0,1), (-1,1), 1, divider_color),
+            ('LINEABOVE', (0,2), (-1,2), 1, divider_color),
+            ('LINEABOVE', (0,3), (-1,3), 1, divider_color),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+            ('TOPPADDING', (0,0), (-1,-1), 8),
+        ]))
+        story.append(create_card("Analysis Details", meta_table))
+        story.append(Spacer(1, 18))
+
+        # D. Raw AI Response Card
+        raw_response_p = Paragraph(analysis_response.raw_response.replace('\n', '<br/>'), styles['BodyText'])
+        story.append(create_card("Detailed AI Output", raw_response_p))
+        story.append(Spacer(1, 18))
+
+        # E. Disclaimer Card
+        disclaimer_text = (
+            "<b>IMPORTANT:</b> This report was generated by an AI model and is intended for informational "
+            "purposes only. It is <b>not a substitute</b> for professional medical advice, diagnosis, or "
+            "treatment from a qualified human expert. Clinical decisions should only be made after "
+            "correlation with patient history and review by a certified radiologist."
+        )
+        disclaimer_p = Paragraph(disclaimer_text, styles['BodyText'])
+        story.append(create_card("Disclaimer", disclaimer_p))
+
+        # --- PAGE BREAK & VISUALS PAGE ---
+        story.append(PageBreak())
+        
+        # F. Visual Analysis Section
+        story.append(Paragraph("Visual Analysis", styles['ReportTitle']))
+        story.append(Paragraph(
+            "The following images provide a side-by-side comparison of the original scan "
+            "and a heatmap visualizing the areas the AI model focused on. Brighter, warmer areas (red, yellow) "
+            "indicate a higher level of AI attention.", styles['ReportSubtitle']
+        ))
+        
+        # Convert PIL images to ReportLab flowables
+        def pil_to_rl_image(img, width):
+            img_buffer = io.BytesIO()
+            img.save(img_buffer, format='PNG')
+            img_buffer.seek(0)
+            return ReportLabImage(img_buffer, width=width, height=width, kind='proportional')
+
+        rl_original_image = pil_to_rl_image(original_image, 3*inch)
+        rl_heatmap_image = pil_to_rl_image(heatmap_image, 3*inch)
+
+        image_comparison_data = [
+            [Paragraph("Original Image", styles['ImageCaption']), Paragraph("AI Heatmap Overlay", styles['ImageCaption'])],
+            [rl_original_image, rl_heatmap_image]
+        ]
+        
+        image_table = Table(image_comparison_data, colWidths=[3.25*inch, 3.25*inch], rowHeights=[None, 3.1*inch])
+        image_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('VALIGN', (0, 1), (-1, 1), 'TOP'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ]))
+        story.append(create_card(None, image_table, padding=18))
+
+        # --- 5. BUILD THE PDF ---
+        try:
+            doc.build(story)
+            logger.info(f"Premium PDF report generated: {filepath}")
+            return filepath
+        except Exception as e:
+            logger.error(f"Error building PDF: {e}", exc_info=True)
+            raise
+
     async def analyze_image_from_upload(self, file: UploadFile) -> tuple[AnalysisResponse, Image.Image, Image.Image]:
         """
         Analyze medical image from uploaded file and return complete analysis response with images.
