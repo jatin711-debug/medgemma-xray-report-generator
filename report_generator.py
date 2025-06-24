@@ -585,10 +585,10 @@ class UltimatePDFGenerator:
         
         story.append(Spacer(1, 30))
         
-        impression_icon = "🚨" if "POSITIVE" in findings.impression.upper() else "✅"
+        impression_icon = "🚨" if "DETECTED" in findings.impression.upper() else "✅"
         confidence_icon = "🎯"
         
-        impression_color = 'danger' if 'POSITIVE' in findings.impression.upper() else 'success'
+        impression_color = 'danger' if 'DETECTED' in findings.impression.upper() else 'success'
         confidence_color = 'success' if 'HIGH' in findings.confidence_level.upper() else 'warning'
         
         stat_cards = [
@@ -689,12 +689,19 @@ class UltimatePDFGenerator:
             [Paragraph("<b>Finding</b>", self.styles['meta_label']), Paragraph("<b>Status</b>", self.styles['meta_label']), Paragraph("<b>AI-Generated Details</b>", self.styles['meta_label'])]
         ]
         
-        for item in findings.detailed_findings:
-            finding_name = item['finding'].replace('_', ' ').title()
-            status_p = Paragraph(f'<font color="{self.colors["danger"].hexval()}"><b>Present</b></font>' if item['present'] else f'<font color="{self.colors["success_dark"].hexval()}">Not Detected</font>', self.styles['body'])
-            details_text = f"<b>Location:</b> {item.get('location', 'N/A')}<br/><b>Details:</b> {item.get('details', 'N/A')}"
-            details_p = Paragraph(details_text, self.styles['body'])
-            detailed_findings_data.append([Paragraph(finding_name, self.styles['body']), status_p, details_p])
+        is_detected = "detected" in findings.impression.lower() and "not detected" not in findings.impression.lower()
+
+        if is_detected:
+            finding_name = findings.impression.replace(" Detected", "")
+            status_p = Paragraph(f'<font color="{self.colors["danger"].hexval()}"><b>Present</b></font>', self.styles['body'])
+            details_text = "<br/>".join(findings.abnormalities)
+        else:
+            finding_name = "Pneumothorax"
+            status_p = Paragraph(f'<font color="{self.colors["success_dark"].hexval()}">Not Detected</font>', self.styles['body'])
+            details_text = findings.abnormalities[0] if findings.abnormalities else "No abnormalities detected."
+
+        details_p = Paragraph(details_text, self.styles['body'])
+        detailed_findings_data.append([Paragraph(finding_name, self.styles['body']), status_p, details_p])
 
         findings_table = Table(detailed_findings_data, colWidths=[1.5*inch, 1.2*inch, 3.8*inch])
         findings_table.setStyle(TableStyle([
