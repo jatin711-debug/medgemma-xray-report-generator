@@ -836,38 +836,6 @@ async def root():
     return {"message": "Medical Image Analysis API (Med-GEMMA-3) is running", "status": "healthy"}
 
 
-@app.post("/analyze", response_model=AnalysisResponse)
-async def analyze_medical_image(file: UploadFile = File(...)):
-    """
-    Analyze uploaded medical image using Med-GEMMA-3 AI model.
-    
-    This endpoint processes uploaded medical images and returns structured
-    analysis results including anatomical findings, abnormalities, and
-    clinical recommendations.
-    
-    Args:
-        file: Uploaded medical image file (JPEG, PNG, TIFF, BMP, WebP)
-        
-    Returns:
-        AnalysisResponse: Complete analysis results with structured findings
-        
-    Raises:
-        HTTPException: For invalid files, processing errors, or analysis failures
-        
-    Features:
-        - File format validation
-        - Size limitations (10MB max)
-        - AI-powered medical analysis
-        - Structured clinical output
-        - Comprehensive metadata collection
-    """
-    if not file.content_type.startswith('image/'):
-        raise HTTPException(status_code=400, detail="File must be an image")
-    
-    analysis_response, _, _ = await analyzer.analyze_image_from_upload(file)
-    return analysis_response
-
-
 @app.post("/analyze-and-report", response_model=PDFGenerationResponse)
 async def analyze_and_generate_report(
     file: UploadFile = File(...)
@@ -908,34 +876,6 @@ async def analyze_and_generate_report(
         pdf_path=pdf_path,
         analysis_id=analysis_response.analysis_id
     )
-
-
-@app.get("/download-report/{analysis_id}")
-async def download_report(analysis_id: str):
-    """
-    Download generated PDF medical report by analysis ID.
-    
-    Args:
-        analysis_id: Unique identifier for the analysis and report
-        
-    Returns:
-        FileResponse: PDF file download
-        
-    Raises:
-        HTTPException: If report file is not found
-    """
-    pdf_filename = f"medical_report_{analysis_id}.pdf"
-    pdf_path = os.path.join(analyzer.reports_dir, pdf_filename)
-    
-    if not os.path.exists(pdf_path):
-        raise HTTPException(status_code=404, detail="Report not found")
-    
-    return FileResponse(
-        pdf_path,
-        media_type='application/pdf',
-        filename=pdf_filename
-    )
-
 
 @app.get("/reports")
 async def list_reports():
@@ -991,7 +931,7 @@ async def analyze_image_url(request: ImageURLRequest):
     analysis_response, _, _ = await analyzer.analyze_image_from_url(str(request.image_url))
     return analysis_response
 
-
+# The working path for the PDF report generation
 @app.post("/analyze-url-and-report", response_model=PDFGenerationResponse)
 async def analyze_url_and_generate_report(
     request: ImageURLReportRequest
