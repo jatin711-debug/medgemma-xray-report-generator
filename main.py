@@ -513,32 +513,36 @@ class MedicalImageAnalyzer:
 
     def _create_heatmap_overlay(self, heatmap: np.ndarray, original_image: Image.Image) -> Image.Image:
         """
-        Overlays a normalized heatmap onto the original image using OpenCV for enhanced visualization.
+        Overlays a focused and visually appealing heatmap onto the original image.
         """
-        logger.info(f"Heatmap stats before normalization: min={heatmap.min():.4f}, max={heatmap.max():.4f}, mean={heatmap.mean():.4f}")
+        logger.info(f"Heatmap stats before processing: min={heatmap.min():.4f}, max={heatmap.max():.4f}, mean={heatmap.mean():.4f}")
 
-        # Normalize heatmap to make it visually clear
+        # Threshold to keep only the top 5% of attention scores for a sharper, more focused heatmap
+        threshold_value = np.percentile(heatmap, 95)
+        heatmap[heatmap < threshold_value] = 0
+
+        # Normalize the thresholded heatmap to the 0-1 range
         if heatmap.max() > heatmap.min():
             heatmap_normalized = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min())
         else:
             heatmap_normalized = np.zeros_like(heatmap)
 
-        # Enhance contrast to make hotspots more prominent
-        heatmap_enhanced = np.power(heatmap_normalized, 2)
+        heatmap_uint8 = np.uint8(255 * heatmap_normalized)
+        
+        # Resize heatmap to match the original image size
+        heatmap_resized = cv2.resize(heatmap_uint8, original_image.size, interpolation=cv2.INTER_LINEAR)
 
-        heatmap_uint8 = np.uint8(255 * heatmap_enhanced)
+        # Apply a Gaussian blur to smooth the edges of the heatmap for a more polished look
+        heatmap_blurred = cv2.GaussianBlur(heatmap_resized, (25, 25), 0)
         
-        # Resize heatmap to match the original image size using a higher-quality interpolation
-        heatmap_resized = cv2.resize(heatmap_uint8, original_image.size, interpolation=cv2.INTER_CUBIC)
-        
-        # Apply a perceptually uniform color map for better visualization
-        heatmap_colored = cv2.applyColorMap(heatmap_resized, cv2.COLORMAP_INFERNO)
+        # Apply a color map that resembles the desired output (hot -> cold)
+        heatmap_colored = cv2.applyColorMap(heatmap_blurred, cv2.COLORMAP_JET)
         
         # Convert PIL image to OpenCV format
         original_cv = cv2.cvtColor(np.array(original_image.convert('RGB')), cv2.COLOR_RGB2BGR)
         
-        # Blend the heatmap with the original image, giving more weight to the heatmap
-        superimposed_img = cv2.addWeighted(heatmap_colored, 0.6, original_cv, 0.4, 0)
+        # Blend the heatmap with the original image, giving equal weight to both
+        superimposed_img = cv2.addWeighted(heatmap_colored, 0.5, original_cv, 0.5, 0)
         
         # Convert back to PIL format
         return Image.fromarray(cv2.cvtColor(superimposed_img, cv2.COLOR_BGR2RGB))
