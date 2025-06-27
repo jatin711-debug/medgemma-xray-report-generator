@@ -338,9 +338,7 @@ class MedicalImageAnalyzer:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Analyze this medical image specifically for pneumothorax. "
-                                                "Don't give any other information. Just say if pneumothorax is detected or not. "
-                                                "If none, say 'No pneumothorax detected'. Give confidence percentage in the response."},
+                        {"type": "text", "text": "Provide a comprehensive radiological analysis of this chest image. Note any abnormalities and conclude with a final impression. Specifically assess for pneumothorax and provide a confidence level for its presence or absence."},
                         {"type": "image", "image": image_for_model}
                     ]
                 }
