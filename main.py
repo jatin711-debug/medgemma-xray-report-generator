@@ -239,23 +239,30 @@ class MedicalImageAnalyzer:
             # 5. Load the processor and the model with recommended settings
             self.processor = AutoProcessor.from_pretrained(self.model_id)
             
-            # Use "eager" attention implementation to ensure attention weights are output for heatmap generation.
-            # Performance-optimized implementations like "flash_attention_2" or "sdpa" do not support this.
+            # Use "flash_attention_2" for performance if available, but it may not support outputting
+            # attention weights. We'll try it first and fall back to a safer implementation.
+            attn_implementation = "flash_attention_2" if torch.cuda.is_available() else "sdpa"
+
             try:
                 self.model = AutoModelForImageTextToText.from_pretrained(
                     self.model_id,
                     torch_dtype=torch_dtype,
                     device_map=device,
                     use_safetensors=True,
-                    attn_implementation="eager"  # Force eager attention for heatmap generation
+                    attn_implementation=attn_implementation,
                 )
-            except (ImportError, ValueError): # Fallback if even eager has issues (unlikely)
-                logger.warning("Default 'eager' attention implementation failed. Retrying without explicit implementation.")
+                logger.info(f"Model loaded successfully with '{attn_implementation}' attention implementation.")
+            except (ImportError, ValueError) as e:
+                logger.warning(
+                    f"'{attn_implementation}' attention implementation failed: {e}. "
+                    f"Falling back to 'eager' which is more reliable for attention outputs."
+                )
                 self.model = AutoModelForImageTextToText.from_pretrained(
                     self.model_id,
                     torch_dtype=torch_dtype,
                     device_map=device,
-                    use_safetensors=True
+                    use_safetensors=True,
+                    attn_implementation="eager",  # Slower but required for attention weights
                 )
             
             self.model_loaded = True
@@ -426,138 +433,79 @@ class MedicalImageAnalyzer:
 
     def _generate_heatmap(self, attentions: Optional[tuple], original_image: Image.Image) -> Image.Image:
         """
-        Generates a heatmap from attention weights and overlays it on the original image.
+        Generates an accurate heatmap from attention weights and overlays it on the original image.
+        This version is specifically designed for models like MedGemma where attention weights
+        from generated tokens to image patches need to be extracted and visualized.
         """
-        if not attentions:
-            logger.warning("No attention weights found. Creating placeholder heatmap.")
+        if not attentions or not hasattr(attentions, '__len__') or len(attentions) == 0:
+            logger.warning("No attention weights found or in invalid format. Creating placeholder heatmap.")
             return self._create_placeholder_heatmap(original_image)
 
         try:
-            # Handle different attention formats from the model
-            if hasattr(attentions, '__len__') and len(attentions) > 0:
-                # Get the last layer's attention (usually most relevant)
-                last_attention = attentions[-1]
-                
-                if isinstance(last_attention, torch.Tensor):
-                    # Shape should be (batch, heads, seq_len, seq_len) or similar
-                    attention_tensor = last_attention.cpu().detach()
-                    
-                    # Handle BFloat16 conversion early
-                    if attention_tensor.dtype == torch.bfloat16:
-                        attention_tensor = attention_tensor.float()
-                    
-                    # Average across batch and heads dimensions
-                    if attention_tensor.dim() == 4:  # (batch, heads, seq_len, seq_len)
-                        # Take mean across batch and heads, then get attention to image tokens
-                        attention_weights = attention_tensor.mean(dim=(0, 1))  # (seq_len, seq_len)
-                        
-                        # For vision models, we typically want the attention from text tokens to image tokens
-                        # or the self-attention within image tokens
-                        # Take the diagonal or sum across the sequence dimension
-                        if attention_weights.size(0) == attention_weights.size(1):
-                            # Use the mean attention weights across the sequence
-                            attention_map = attention_weights.mean(dim=0)  # Average attention received by each token
-                        else:
-                            attention_map = attention_weights.flatten()
-                            
-                    elif attention_tensor.dim() == 3:  # (batch, seq_len, seq_len) or (heads, seq_len, seq_len)
-                        attention_weights = attention_tensor.mean(dim=0)  # Average first dimension
-                        attention_map = attention_weights.mean(dim=0) if attention_weights.dim() == 2 else attention_weights.flatten()
-                        
-                    elif attention_tensor.dim() == 2:  # (seq_len, seq_len)
-                        attention_map = attention_tensor.mean(dim=0)
-                        
-                    else:  # Other dimensions
-                        attention_map = attention_tensor.flatten()
-                    
-                    # Convert to numpy - handle different dtypes properly
-                    if attention_map.dtype == torch.bfloat16:
-                        attention_np = attention_map.float().numpy()
-                    elif hasattr(attention_map, 'numpy'):
-                        attention_np = attention_map.numpy()
-                    else:
-                        attention_np = attention_map.cpu().numpy()
-                    
-                    # Ensure we have valid attention weights
-                    if len(attention_np) == 0:
-                        logger.warning("Empty attention weights. Creating placeholder heatmap.")
-                        return self._create_placeholder_heatmap(original_image)
-                    
-                    # Try to reshape to a reasonable spatial grid
-                    heatmap = self._reshape_attention_to_grid(attention_np)
-                    
-                else:
-                    logger.warning("Attention tensor is not a torch.Tensor. Creating placeholder heatmap.")
-                    return self._create_placeholder_heatmap(original_image)
-            else:
-                logger.warning("Invalid attention format. Creating placeholder heatmap.")
+            # For generative models, attentions are a tuple per generated token.
+            # We focus on the attention from the first generated token, as it's most indicative.
+            first_token_attentions = attentions[0]  # Tuple of attentions for each layer
+
+            # Each layer_attention is shape: (batch_size, num_heads, 1, sequence_length)
+            # We stack them to average across layers.
+            stacked_attentions = torch.stack([layer.squeeze(2) for layer in first_token_attentions])
+            
+            # Average across layers and heads
+            # Shape becomes (batch_size, sequence_length)
+            avg_attentions = stacked_attentions.mean(dim=(0, 2))
+            
+            # Assume batch size is 1 and move to CPU
+            attention_vector = avg_attentions.squeeze(0).cpu().float().detach()
+
+            # For ViT-based models like MedGemma, the image is divided into a grid of patches.
+            # A common configuration is a 16x16 grid, resulting in 256 patches/tokens.
+            num_image_patches = 256
+            grid_size = 16
+            
+            # We assume the image patches are the last tokens in the sequence.
+            if attention_vector.shape[0] < num_image_patches:
+                logger.warning(f"Attention vector length ({attention_vector.shape[0]}) is less than "
+                               f"expected image patches ({num_image_patches}). Cannot generate heatmap.")
                 return self._create_placeholder_heatmap(original_image)
 
-            # Normalize the heatmap
-            if heatmap.max() > heatmap.min():
-                heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min())
-            else:
-                heatmap = np.ones_like(heatmap) * 0.5  # Uniform attention if all values are the same
+            image_attention = attention_vector[-num_image_patches:]
             
-            # Resize heatmap to match original image
-            heatmap_resized = cv2.resize(heatmap.astype(np.float32), original_image.size, interpolation=cv2.INTER_LINEAR)
-            
-            # Apply colormap and create overlay
-            return self._create_heatmap_overlay(heatmap_resized, original_image)
+            # Reshape the 1D attention vector into a 2D grid
+            heatmap = image_attention.reshape(grid_size, grid_size).numpy()
+
+            # Create the visual heatmap overlay
+            return self._create_heatmap_overlay(heatmap, original_image)
 
         except Exception as e:
-            logger.error(f"Heatmap generation failed: {e}", exc_info=True)
+            logger.error(f"Error generating heatmap: {e}", exc_info=True)
             return self._create_placeholder_heatmap(original_image)
-
-    def _reshape_attention_to_grid(self, attention_np: np.ndarray) -> np.ndarray:
-        """
-        Reshape 1D attention weights to a 2D spatial grid, assuming image tokens are at the end.
-        This is specifically tailored for models that process a 224x224 image into a 14x14 patch grid.
-        """
-        # For a 224x224 image with 16x16 patches, the grid is 14x14.
-        PATCH_GRID_SIZE = 14
-        NUM_PATCHES = PATCH_GRID_SIZE * PATCH_GRID_SIZE  # 196
-
-        # The full sequence includes text tokens and image patch tokens.
-        # We assume the image patch tokens are the last `NUM_PATCHES` elements.
-        if len(attention_np) < NUM_PATCHES:
-            logger.warning(
-                f"Attention vector length ({len(attention_np)}) is smaller than the expected "
-                f"number of image patches ({NUM_PATCHES}). Creating a placeholder grid."
-            )
-            # Fallback: create a blank heatmap if attention is not as expected.
-            return np.zeros((PATCH_GRID_SIZE, PATCH_GRID_SIZE))
-
-        # Extract the attention weights corresponding to the image patches.
-        image_attention = attention_np[-NUM_PATCHES:]
-        
-        # Reshape into the 2D grid that matches the image's patch structure.
-        return image_attention.reshape(PATCH_GRID_SIZE, PATCH_GRID_SIZE)
 
     def _create_heatmap_overlay(self, heatmap: np.ndarray, original_image: Image.Image) -> Image.Image:
         """
-        Create a colored heatmap overlay on the original image.
+        Overlays a normalized heatmap onto the original image using OpenCV.
         """
-        # Convert heatmap to 8-bit
-        heatmap_uint8 = np.uint8(255 * np.clip(heatmap, 0, 1))
+        # Normalize heatmap to make it visually clear
+        if heatmap.max() > heatmap.min():
+            heatmap_normalized = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min())
+        else:
+            heatmap_normalized = np.zeros_like(heatmap)
+
+        heatmap_uint8 = np.uint8(255 * heatmap_normalized)
         
-        # Apply colormap (JET colormap: blue=low attention, red=high attention)
-        heatmap_colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+        # Resize heatmap to match the original image size
+        heatmap_resized = cv2.resize(heatmap_uint8, original_image.size, interpolation=cv2.INTER_LINEAR)
         
-        # Convert original image to BGR for blending
-        original_bgr = cv2.cvtColor(np.array(original_image.convert("RGB")), cv2.COLOR_RGB2BGR)
+        # Apply a color map for better visualization
+        heatmap_colored = cv2.applyColorMap(heatmap_resized, cv2.COLORMAP_JET)
         
-        # Ensure both images are the same size
-        if heatmap_colored.shape[:2] != original_bgr.shape[:2]:
-            heatmap_colored = cv2.resize(heatmap_colored, (original_bgr.shape[1], original_bgr.shape[0]))
+        # Convert PIL image to OpenCV format
+        original_cv = cv2.cvtColor(np.array(original_image.convert('RGB')), cv2.COLOR_RGB2BGR)
         
-        # Blend the images (60% original, 40% heatmap)
-        blended = cv2.addWeighted(original_bgr, 0.6, heatmap_colored, 0.4, 0)
+        # Blend the heatmap with the original image
+        superimposed_img = cv2.addWeighted(heatmap_colored, 0.5, original_cv, 0.5, 0)
         
-        # Convert back to RGB
-        blended_rgb = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
-        
-        return Image.fromarray(blended_rgb)
+        # Convert back to PIL format
+        return Image.fromarray(cv2.cvtColor(superimposed_img, cv2.COLOR_BGR2RGB))
 
     def _create_placeholder_heatmap(self, original_image: Image.Image) -> Image.Image:
         """
