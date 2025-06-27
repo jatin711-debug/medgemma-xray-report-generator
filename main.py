@@ -434,46 +434,77 @@ class MedicalImageAnalyzer:
     def _generate_heatmap(self, attentions: Optional[tuple], original_image: Image.Image) -> Image.Image:
         """
         Generates an accurate heatmap from attention weights and overlays it on the original image.
-        This version is specifically designed for models like MedGemma where attention weights
-        from generated tokens to image patches need to be extracted and visualized.
+        This version correctly processes attention from multi-layer, multi-head models like MedGemma
+        by averaging attention from text tokens to image patches.
         """
         if not attentions or not hasattr(attentions, '__len__') or len(attentions) == 0:
             logger.warning("No attention weights found or in invalid format. Creating placeholder heatmap.")
             return self._create_placeholder_heatmap(original_image)
 
         try:
-            # For generative models, attentions are a tuple per generated token.
-            # We focus on the attention from the first generated token, as it's most indicative.
-            first_token_attentions = attentions[0]  # Tuple of attentions for each layer
+            logger.info(f"Initial attention type: {type(attentions)}, length: {len(attentions)}")
+            if len(attentions) > 0:
+                logger.info(f"Shape of first attention tensor: {attentions[0].shape}, dtype: {attentions[0].dtype}")
 
-            # Each layer_attention is shape: (batch_size, num_heads, 1, sequence_length)
-            # We stack them to average across layers.
-            stacked_attentions = torch.stack([layer.squeeze(2) for layer in first_token_attentions])
+            # attentions is a tuple of tensors, one for each layer.
+            # Shape of each tensor: (batch, heads, seq_len, seq_len).
             
-            # Average across layers and heads
-            # Shape becomes (batch_size, sequence_length)
+            # Convert from bfloat16 if needed, as it's not widely supported for CPU operations
+            if attentions[0].dtype == torch.bfloat16:
+                attentions = tuple(a.float() for a in attentions)
+                logger.info(f"Converted attentions to float32. New dtype: {attentions[0].dtype}")
+
+            # Stack all layer attentions: (layers, batch, heads, seq, seq)
+            stacked_attentions = torch.stack(attentions)
+            logger.info(f"Shape of stacked_attentions: {stacked_attentions.shape}")
+            
+            # Average over layers and heads to get a single attention map per batch item
+            # Resulting shape: (batch, seq, seq)
             avg_attentions = stacked_attentions.mean(dim=(0, 2))
+            logger.info(f"Shape of avg_attentions: {avg_attentions.shape}")
             
-            # Assume batch size is 1 and move to CPU
-            attention_vector = avg_attentions.squeeze(0).cpu().float().detach()
+            # Assume batch size is 1 and move to CPU for numpy conversion
+            # Resulting shape: (seq, seq)
+            attention_map = avg_attentions.squeeze(0).cpu().detach()
+            logger.info(f"Shape of final attention_map: {attention_map.shape}")
 
-            # For ViT-based models like MedGemma, the image is divided into a grid of patches.
+            # For ViT-based models, the image is divided into a grid of patches.
             # A common configuration is a 16x16 grid, resulting in 256 patches/tokens.
             num_image_patches = 256
             grid_size = 16
             
-            # We assume the image patches are the last tokens in the sequence.
-            if attention_vector.shape[0] < num_image_patches:
-                logger.warning(f"Attention vector length ({attention_vector.shape[0]}) is less than "
-                               f"expected image patches ({num_image_patches}). Cannot generate heatmap.")
+            seq_len = attention_map.shape[0]
+            num_text_tokens = seq_len - num_image_patches
+            logger.info(f"Sequence length: {seq_len}, Num text tokens: {num_text_tokens}, Num image patches: {num_image_patches}")
+
+            if num_text_tokens < 1:
+                logger.warning(f"Sequence length ({seq_len}) is not larger than image patches ({num_image_patches}). "
+                               f"Cannot determine text tokens to generate heatmap.")
                 return self._create_placeholder_heatmap(original_image)
 
-            image_attention = attention_vector[-num_image_patches:]
+            # We are interested in how much the text tokens (the prompt) attend to the image patch tokens.
+            # The image patches are usually appended at the end of the sequence.
+            # The text tokens are at the beginning.
+            # Slice the attention map to get attentions from text to image patches.
+            # Shape: (num_text_tokens, num_image_patches)
+            text_to_image_attention = attention_map[:num_text_tokens, num_text_tokens:]
+            logger.info(f"Shape of text_to_image_attention: {text_to_image_attention.shape}")
             
-            # Reshape the 1D attention vector into a 2D grid
+            # Average the attention from all text tokens to each image patch.
+            # This gives a single score per image patch.
+            # Shape: (num_image_patches)
+            image_attention = text_to_image_attention.mean(dim=0)
+            logger.info(f"Shape of image_attention: {image_attention.shape}")
+            
+            if image_attention.shape[0] != num_image_patches:
+                 logger.warning(f"Resulting image attention vector length ({image_attention.shape[0]}) "
+                                f"does not match num_image_patches ({num_image_patches}).")
+                 return self._create_placeholder_heatmap(original_image)
+
+            # Reshape the 1D attention vector into a 2D grid that matches the patch layout.
             heatmap = image_attention.reshape(grid_size, grid_size).numpy()
 
-            # Create the visual heatmap overlay
+            # Create the visual heatmap overlay and return it.
             return self._create_heatmap_overlay(heatmap, original_image)
 
         except Exception as e:
