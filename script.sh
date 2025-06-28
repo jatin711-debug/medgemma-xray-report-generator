@@ -2,11 +2,11 @@
 
 # Update package lists
 echo "Updating package lists..."
-sudo apt-get update
+apt-get update
 
 # Install vim
 echo "Installing vim..."
-sudo apt install -y vim
+apt install -y vim
 
 echo "creating a .env file..."
 touch .env
