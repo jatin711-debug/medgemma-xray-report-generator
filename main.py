@@ -239,35 +239,59 @@ class MedicalImageAnalyzer:
             # 5. Load the processor and the model with recommended settings
             self.processor = AutoProcessor.from_pretrained(self.model_id)
             
-            # Use "flash_attention_2" for performance if available, but it may not support outputting
-            # attention weights. We'll try it first and fall back to a safer implementation.
-            attn_implementation = "flash_attention_2" if torch.cuda.is_available() else "sdpa"
-
-            try:
-                self.model = AutoModelForImageTextToText.from_pretrained(
-                    self.model_id,
-                    torch_dtype=torch_dtype,
-                    device_map=device,
-                    use_safetensors=True,
-                    attn_implementation=attn_implementation,
-                )
-                logger.info(f"Model loaded successfully with '{attn_implementation}' attention implementation.")
-            except (ImportError, ValueError) as e:
-                logger.warning(
-                    f"'{attn_implementation}' attention implementation failed: {e}. "
-                    f"Falling back to 'eager' which is more reliable for attention outputs."
-                )
-                self.model = AutoModelForImageTextToText.from_pretrained(
-                    self.model_id,
-                    torch_dtype=torch_dtype,
-                    device_map=device,
-                    use_safetensors=True,
-                    attn_implementation="eager",  # Slower but required for attention weights
-                )
+            # Comprehensive fallback system for attention implementations
+            # Priority order: flash_attention_2 > sdpa > eager (most reliable)
+            attention_implementations = []
+            
+            if torch.cuda.is_available():
+                attention_implementations = ["flash_attention_2", "sdpa", "eager"]
+            else:
+                attention_implementations = ["sdpa", "eager"]
+            
+            model_loaded_successfully = False
+            last_error = None
+            
+            for attn_impl in attention_implementations:
+                try:
+                    logger.info(f"Attempting to load model with '{attn_impl}' attention implementation...")
+                    
+                    self.model = AutoModelForImageTextToText.from_pretrained(
+                        self.model_id,
+                        torch_dtype=torch_dtype,
+                        device_map=device,
+                        use_safetensors=True,
+                        attn_implementation=attn_impl,
+                    )
+                    
+                    logger.info(f"✅ Model loaded successfully with '{attn_impl}' attention implementation.")
+                    model_loaded_successfully = True
+                    break
+                    
+                except Exception as e:
+                    last_error = e
+                    logger.warning(f"❌ Failed to load with '{attn_impl}': {str(e)}")
+                    
+                    # Clean up failed attempt
+                    if hasattr(self, 'model') and self.model is not None:
+                        del self.model
+                        self.model = None
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    
+                    # If this was the last attempt, don't continue
+                    if attn_impl == attention_implementations[-1]:
+                        break
+                    
+                    logger.info(f"Trying next fallback option...")
+            
+            # Check if model loading failed completely
+            if not model_loaded_successfully:
+                raise Exception(f"Failed to load model with any attention implementation. Last error: {last_error}")
             
             self.model_loaded = True
             model_loading_error = None
-            logger.info(f"Med-GEMMA-3 loaded successfully on '{device}' in eager mode.")
+            logger.info(f"Med-GEMMA-3 loaded successfully on '{device}' with robust fallback system.")
             
         except Exception as e:
             # 6. Catch any exception during loading (OOM, network, etc.)
