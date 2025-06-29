@@ -362,7 +362,7 @@ class MedicalImageAnalyzer:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Provide a comprehensive radiological analysis of this chest image. Note any abnormalities and conclude with a final impression. Specifically assess for pneumothorax and provide a confidence level for its presence or absence."},
+                        {"type": "text", "text": "Analyze this chest image for pneumothorax detection. First, clearly state if pneumothorax is detected or not detected with a confidence percentage. If none detected, state 'No pneumothorax detected' with confidence level. Then provide a brief radiological analysis noting any other visible abnormalities and conclude with a final clinical impression."},
                         {"type": "image", "image": image_for_model}
                     ]
                 }
