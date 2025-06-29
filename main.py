@@ -240,13 +240,13 @@ class MedicalImageAnalyzer:
             self.processor = AutoProcessor.from_pretrained(self.model_id)
             
             # Comprehensive fallback system for attention implementations
-            # Priority order: sdpa > eager (most reliable)
+            # Priority order: eager (required for output_attentions=True)
             attention_implementations = []
             
             if torch.cuda.is_available():
-                attention_implementations = ["sdpa", "eager"]
+                attention_implementations = ["eager"]
             else:
-                attention_implementations = ["sdpa", "eager"]
+                attention_implementations = ["eager"]
             
             model_loaded_successfully = False
             last_error = None
