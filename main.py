@@ -24,7 +24,7 @@ from PIL import Image
 from report_generator import UltimatePDFGenerator
 import gc
 import torch
-from transformers import AutoProcessor, AutoModelForImageTextToText 
+from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -202,104 +202,59 @@ class MedicalImageAnalyzer:
     
     async def load_model(self) -> None:
         """
-        Load and initialize the Med-GEMMA-3 model with optimal device configuration.
-        This version is simplified to run in eager mode, avoiding torch.compile errors.
+        Load the Med-GEMMA-3 model and processor with memory optimization.
+        
+        This method handles the loading of the Med-GEMMA-3 model and its
+        associated processor. It includes several optimizations for memory
+        management, including:
+        - 4-bit quantization to reduce model size
+        - Support for CPU offloading if CUDA is not available
+        - Automatic garbage collection to free up unused memory
+        
+        The method will attempt to load the model on a CUDA-enabled GPU if
+        available, falling back to the CPU if necessary.
         """
         global model_loading_error
-        
-        # 1. Check if model is already loaded and healthy
-        if self.model_loaded and self.model is not None and model_loading_error is None:
-            logger.info("Model is already loaded.")
+        if self.model_loaded:
+            logger.info("Model already loaded.")
             return
-        
-        # 2. Prevent retrying a load that has already failed
-        if model_loading_error is not None:
-            raise HTTPException(status_code=503, detail=f"Model loading previously failed: {model_loading_error}")
-        
-        logger.info(f"Loading Med-GEMMA-3 model ({self.model_id})...")
-        logger.info(f"System memory: {self.get_system_memory_info()}")
-        
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Loading model on device: {device}")
+        logger.info(f"System memory before loading: {self.get_system_memory_info()}")
+
+        # Configure 4-bit quantization
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16
+        )
+
         try:
-            # 3. Clean up any previous state before loading
-            if self.model is not None:
-                del self.model
-            if self.processor is not None:
-                del self.processor
+            self.processor = AutoProcessor.from_pretrained(self.model_id, use_fast=True)
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                self.model_id,
+                quantization_config=quantization_config,
+                torch_dtype=torch.bfloat16,
+                attn_implementation="eager",  # Required for attention scores
+                device_map="auto"  # Automatically handle device placement
+            )
+            self.model_loaded = True
+            model_loading_error = None
+            logger.info("Model loaded successfully.")
+            logger.info(f"System memory after loading: {self.get_system_memory_info()}")
+        except Exception as e:
+            self.model_loaded = False
+            model_loading_error = f"Failed to load model: {str(e)}"
+            logger.error(model_loading_error)
+            # Clean up memory on failure
+            del self.model
+            del self.processor
             self.model = None
             self.processor = None
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            
-            # 4. Determine optimal device and data type for eager mode
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            torch_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
-            logger.info(f"Attempting to load model on device='{device}' with dtype='{torch_dtype}'")
-
-            # 5. Load the processor and the model with recommended settings
-            self.processor = AutoProcessor.from_pretrained(self.model_id, use_fast=True)
-            
-            # Comprehensive fallback system for attention implementations
-            # Priority order: eager (required for output_attentions=True)
-            attention_implementations = []
-            
-            if torch.cuda.is_available():
-                attention_implementations = ["eager"]
-            else:
-                attention_implementations = ["eager"]
-            
-            model_loaded_successfully = False
-            last_error = None
-            
-            for attn_impl in attention_implementations:
-                try:
-                    logger.info(f"Attempting to load model with '{attn_impl}' attention implementation...")
-                    
-                    self.model = AutoModelForImageTextToText.from_pretrained(
-                        self.model_id,
-                        torch_dtype=torch_dtype,
-                        device_map=device,
-                        use_safetensors=True,
-                        attn_implementation=attn_impl,
-                    )
-                    
-                    logger.info(f"✅ Model loaded successfully with '{attn_impl}' attention implementation.")
-                    model_loaded_successfully = True
-                    break
-                    
-                except Exception as e:
-                    last_error = e
-                    logger.warning(f"❌ Failed to load with '{attn_impl}': {str(e)}")
-                    
-                    # Clean up failed attempt
-                    if hasattr(self, 'model') and self.model is not None:
-                        del self.model
-                        self.model = None
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                    
-                    # If this was the last attempt, don't continue
-                    if attn_impl == attention_implementations[-1]:
-                        break
-                    
-                    logger.info(f"Trying next fallback option...")
-            
-            # Check if model loading failed completely
-            if not model_loaded_successfully:
-                raise Exception(f"Failed to load model with any attention implementation. Last error: {last_error}")
-            
-            self.model_loaded = True
-            model_loading_error = None
-            logger.info(f"Med-GEMMA-3 loaded successfully on '{device}' with robust fallback system.")
-            
-        except Exception as e:
-            # 6. Catch any exception during loading (OOM, network, etc.)
-            err_msg = f"Failed to load Med-GEMMA-3: {e}"
-            model_loading_error = err_msg
-            # Log the full stack trace for easier debugging
-            logger.error(err_msg, exc_info=True) 
-            raise HTTPException(status_code=503, detail=model_loading_error)
     
     def parse_ai_response(self, raw_response: str) -> RadiologyFindings:
         """
