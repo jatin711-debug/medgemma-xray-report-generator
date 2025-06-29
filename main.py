@@ -312,21 +312,28 @@ class MedicalImageAnalyzer:
             messages = [
                 {
                     "role": "system",
-                    "content": [{"type": "text", "text": "You are an expert radiologist."}]
+                    "content": [{"type": "text", "text": "You are a highly experienced radiologist. You analyze chest X-rays for critical findings, especially pneumothorax."}]
                 },
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Analyze the provided image for pneumothorax. "
-                                                "Your response must be strictly one of the following: "
-                                                "'Pneumothorax detected' or 'No pneumothorax detected'. "
-                                                "Follow this with the confidence level, like 'Confidence: XX%'."
-                                                "Provide no other text or explanation."
-                                                },
+                        {
+                            "type": "text",
+                            "text": (
+                                "Review this chest X-ray carefully for signs of pneumothorax, including loss of lung markings, "
+                                "pleural line visibility, and increased radiolucency.\n\n"
+                                "Respond strictly in the following format:\n\n"
+                                "**Finding**: [Pneumothorax detected | No pneumothorax detected]\n"
+                                "**Confidence**: [XX%]\n"
+                                "**Brief Reasoning**: [One-sentence justification using clinical language]\n\n"
+                                "Keep the response within 2 lines total. Do not include any disclaimers or extra comments."
+                            )
+                        },
                         {"type": "image", "image": image_for_model}
                     ]
                 }
             ]
+
 
             # Prepare inputs with processor
             inputs = self.processor.apply_chat_template(
