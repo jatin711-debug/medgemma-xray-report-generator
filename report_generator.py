@@ -160,180 +160,217 @@ class UltimatePDFGenerator:
     def _setup_styles(self):
         """Create sophisticated typography system"""
         self.styles = {
-            # Hero title
+            # Hero title - reduced size for professionalism
             'hero_title': ParagraphStyle(
                 'HeroTitle',
                 fontName=self.font_display,
-                fontSize=32,
+                fontSize=24,
                 textColor=self.colors['primary_dark'],
-                spaceAfter=8,
-                leading=36,
-                alignment=TA_LEFT
+                spaceAfter=6,
+                leading=28,
+                alignment=TA_LEFT,
+                wordWrap='CJK'
             ),
             
-            # Main title
+            # Main title - more compact
             'main_title': ParagraphStyle(
                 'MainTitle',
                 fontName=self.font_display,
-                fontSize=26,
+                fontSize=20,
                 textColor=self.colors['primary'],
-                spaceAfter=6,
-                leading=30,
-                alignment=TA_LEFT
+                spaceAfter=5,
+                leading=24,
+                alignment=TA_LEFT,
+                wordWrap='CJK'
             ),
             
-            # Subtitle with style
+            # Subtitle with better wrapping
             'subtitle': ParagraphStyle(
                 'Subtitle',
                 fontName=self.font_body,
-                fontSize=14,
+                fontSize=12,
                 textColor=self.colors['gray_600'],
-                spaceAfter=24,
-                leading=20,
-                alignment=TA_LEFT
+                spaceAfter=20,
+                leading=16,
+                alignment=TA_LEFT,
+                wordWrap='CJK'
             ),
             
-            # Section headers
+            # Section headers - professional size
             'section_header': ParagraphStyle(
                 'SectionHeader',
                 fontName=self.font_display,
-                fontSize=18,
+                fontSize=16,
                 textColor=self.colors['primary'],
-                spaceBefore=28,
-                spaceAfter=12,
-                leading=22,
-                alignment=TA_LEFT
+                spaceBefore=24,
+                spaceAfter=10,
+                leading=20,
+                alignment=TA_LEFT,
+                wordWrap='CJK'
             ),
             
-            # Subsection headers
+            # Subsection headers - compact
             'subsection_header': ParagraphStyle(
                 'SubsectionHeader',
                 fontName=self.font_body_bold,
-                fontSize=14,
+                fontSize=12,
                 textColor=self.colors['gray_700'],
-                spaceBefore=16,
-                spaceAfter=8,
-                leading=18,
-                alignment=TA_LEFT
+                spaceBefore=14,
+                spaceAfter=6,
+                leading=16,
+                alignment=TA_LEFT,
+                wordWrap='CJK'
             ),
             
-            # Premium body text
+            # Premium body text with better wrapping
             'body': ParagraphStyle(
                 'BodyText',
                 fontName=self.font_body,
-                fontSize=11,
+                fontSize=10,
                 textColor=self.colors['gray_700'],
-                leading=18,
-                spaceAfter=10,
+                leading=15,
+                spaceAfter=8,
                 alignment=TA_JUSTIFY,
                 leftIndent=0,
-                rightIndent=0
+                rightIndent=0,
+                wordWrap='CJK'
             ),
             
-            # Statistics - Large numbers
+            # Statistics - Large numbers - more compact
             'stat_value_large': ParagraphStyle(
                 'StatValueLarge',
                 fontName=self.font_display,
-                fontSize=36,
+                fontSize=28,
                 textColor=self.colors['primary'],
                 alignment=TA_CENTER,
-                spaceAfter=4,
-                leading=40
+                spaceAfter=3,
+                leading=32,
+                wordWrap='CJK'
             ),
             
-            # Statistics - Medium numbers
+            # Statistics - Medium numbers - professional size
             'stat_value': ParagraphStyle(
                 'StatValue',
                 fontName=self.font_display,
-                fontSize=24,
+                fontSize=18,
                 textColor=self.colors['primary'],
                 alignment=TA_CENTER,
-                spaceAfter=4,
-                leading=28
+                spaceAfter=3,
+                leading=22,
+                wordWrap='CJK'
             ),
             
-            # Stat labels
+            # Stat labels - smaller for clean look
             'stat_label': ParagraphStyle(
                 'StatLabel',
                 fontName=self.font_body,
-                fontSize=11,
+                fontSize=9,
                 textColor=self.colors['gray_500'],
                 alignment=TA_CENTER,
-                leading=14
+                leading=12,
+                wordWrap='CJK'
             ),
             
-            # Image captions
+            # Image captions - professional size
             'caption': ParagraphStyle(
                 'Caption',
                 fontName=self.font_body_bold,
-                fontSize=12,
+                fontSize=10,
                 textColor=self.colors['gray_700'],
                 alignment=TA_CENTER,
-                spaceAfter=8,
-                spaceBefore=12
+                spaceAfter=6,
+                spaceBefore=8,
+                wordWrap='CJK'
             ),
             
-            # Metadata labels
+            # Metadata labels - compact
             'meta_label': ParagraphStyle(
                 'MetaLabel',
                 fontName=self.font_body_bold,
-                fontSize=11,
+                fontSize=9,
                 textColor=self.colors['gray_800'],
-                leading=16
+                leading=14,
+                wordWrap='CJK'
             ),
             
-            # Metadata values
+            # Metadata values - readable size
             'meta_value': ParagraphStyle(
                 'MetaValue',
                 fontName=self.font_body,
-                fontSize=11,
+                fontSize=9,
                 textColor=self.colors['gray_600'],
-                leading=16
+                leading=14,
+                wordWrap='CJK'
             ),
             
-            # Disclaimer
+            # Disclaimer - smaller for legal text
             'disclaimer': ParagraphStyle(
                 'Disclaimer',
                 fontName=self.font_body,
-                fontSize=10,
+                fontSize=8,
                 textColor=self.colors['gray_600'],
-                leading=14,
-                leftIndent=16,
-                rightIndent=16,
-                spaceAfter=12,
-                spaceBefore=12,
-                alignment=TA_JUSTIFY
+                leading=12,
+                leftIndent=12,
+                rightIndent=12,
+                spaceAfter=8,
+                spaceBefore=8,
+                alignment=TA_JUSTIFY,
+                wordWrap='CJK'
             ),
             
-            # Alert text
+            # Alert text - professional sizing
             'alert': ParagraphStyle(
                 'Alert',
                 fontName=self.font_body_bold,
-                fontSize=12,
+                fontSize=10,
                 textColor=self.colors['danger'],
-                leading=16,
-                spaceAfter=8,
-                spaceBefore=8
+                leading=14,
+                spaceAfter=6,
+                spaceBefore=6,
+                wordWrap='CJK'
             ),
             
-            # Success text
+            # Success text - clean look
             'success_text': ParagraphStyle(
                 'SuccessText',
                 fontName=self.font_body_bold,
-                fontSize=12,
+                fontSize=10,
                 textColor=self.colors['success'],
-                leading=16
+                leading=14,
+                wordWrap='CJK'
             ),
             
-            # Technical details
+            # Technical details - compact formatting
             'technical': ParagraphStyle(
                 'Technical',
                 fontName=self.font_body,
-                fontSize=10,
+                fontSize=8,
                 textColor=self.colors['gray_600'],
-                leading=15,
-                leftIndent=12,
-                spaceAfter=8
+                leading=12,
+                leftIndent=8,
+                spaceAfter=6,
+                wordWrap='CJK'
+            ),
+            
+            # Professional finding status style
+            'finding_status': ParagraphStyle(
+                'FindingStatus',
+                fontName=self.font_body_bold,
+                fontSize=10,
+                leading=14,
+                alignment=TA_CENTER,
+                wordWrap='CJK'
+            ),
+            
+            # Professional table header style
+            'table_header': ParagraphStyle(
+                'TableHeader',
+                fontName=self.font_body_bold,
+                fontSize=10,
+                textColor=self.colors['gray_800'],
+                leading=14,
+                alignment=TA_CENTER,
+                wordWrap='CJK'
             )
         }
 
@@ -380,12 +417,12 @@ class UltimatePDFGenerator:
             canvas.setFont(self.font_display, 16)
             canvas.drawCentredString(logo_x + 20, logo_y + 14, "AI")
         
-        # Header text
-        canvas.setFont(self.font_display, 18)
+        # Header text - professional sizing
+        canvas.setFont(self.font_display, 14)
         canvas.setFillColor(self.colors['primary_dark'])
         canvas.drawString(logo_x + 60, logo_y + 25, "AI MEDICAL DIAGNOSTIC SYSTEM")
         
-        canvas.setFont(self.font_body, 12)
+        canvas.setFont(self.font_body, 10)
         canvas.setFillColor(self.colors['gray_600'])
         canvas.drawString(logo_x + 60, logo_y + 8, "Advanced Neural Network Analysis • Clinical Decision Support")
         
@@ -450,29 +487,29 @@ class UltimatePDFGenerator:
             value_color = self.colors['primary_dark']
         
         value_style = ParagraphStyle(
-            'CardValue', parent=self.styles['stat_value'], textColor=value_color, fontSize=28, leading=32
+            'CardValue', parent=self.styles['stat_value'], textColor=value_color, fontSize=20, leading=24
         )
         label_style = ParagraphStyle(
-            'CardLabel', parent=self.styles['stat_label'], textColor=self.colors['gray_600'], fontSize=12, leading=16
+            'CardLabel', parent=self.styles['stat_label'], textColor=self.colors['gray_600'], fontSize=10, leading=14
         )
         
         card_content = [
-            [Paragraph(f"{icon}", ParagraphStyle('Icon', fontSize=20, alignment=TA_CENTER, spaceAfter=8))],
+            [Paragraph(f"{icon}", ParagraphStyle('Icon', fontSize=16, alignment=TA_CENTER, spaceAfter=6))],
             [Paragraph(str(value), value_style)],
             [Paragraph(label, label_style)]
         ]
         
-        card_table = Table(card_content, colWidths=[2.8 * inch])
+        card_table = Table(card_content, colWidths=[2.6 * inch])
         card_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), bg_color),
-            ('BOX', (0, 0), (-1, -1), 3, border_color),
-            ('TOPPADDING', (0, 0), (-1, -1), 20),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 20),
-            ('LEFTPADDING', (0, 0), (-1, -1), 15),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 15),
+            ('BOX', (0, 0), (-1, -1), 2, border_color),
+            ('TOPPADDING', (0, 0), (-1, -1), 15),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 15),
+            ('LEFTPADDING', (0, 0), (-1, -1), 12),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 12),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [12, 12, 12, 12]),
+            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [10, 10, 10, 10]),
         ]))
         
         return card_table
@@ -504,21 +541,21 @@ class UltimatePDFGenerator:
         styled_rows = []
         for icon, label, value in metadata_items:
             row = [
-                Paragraph(icon, ParagraphStyle('Icon', fontSize=14, alignment=TA_CENTER)),
+                Paragraph(icon, ParagraphStyle('Icon', fontSize=12, alignment=TA_CENTER)),
                 Paragraph(label, self.styles['meta_label']),
                 Paragraph(str(value), self.styles['meta_value'])
             ]
             styled_rows.append(row)
         
-        meta_table = Table(styled_rows, colWidths=[0.4*inch, 1.3*inch, None])
+        meta_table = Table(styled_rows, colWidths=[0.3*inch, 1.2*inch, None])
         meta_table.setStyle(TableStyle([
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('PADDING', (0, 0), (-1, -1), 8),
-            ('LEFTPADDING', (0, 0), (0, -1), 4),
-            ('RIGHTPADDING', (-1, 0), (-1, -1), 4),
+            ('PADDING', (0, 0), (-1, -1), 6),
+            ('LEFTPADDING', (0, 0), (0, -1), 3),
+            ('RIGHTPADDING', (-1, 0), (-1, -1), 3),
             ('LINEBELOW', (0, 0), (-1, -2), 0.5, self.colors['gray_200']),
             ('BACKGROUND', (0, 0), (-1, -1), self.colors['gray_50']),
-            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
+            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [6, 6, 6, 6]),
         ]))
         
         return meta_table
@@ -606,10 +643,10 @@ class UltimatePDFGenerator:
             )
         ]
         
-        cards_table = Table([stat_cards], colWidths=[3*inch, 3*inch], hAlign='CENTER')
+        cards_table = Table([stat_cards], colWidths=[2.8*inch, 2.8*inch], hAlign='CENTER')
         cards_table.setStyle(TableStyle([
-            ('LEFTPADDING', (0, 0), (0, 0), 12), ('RIGHTPADDING', (0, 0), (0, 0), 0),
-            ('LEFTPADDING', (1, 0), (1, 0), 0), ('RIGHTPADDING', (1, 0), (1, 0), 12),
+            ('LEFTPADDING', (0, 0), (0, 0), 8), ('RIGHTPADDING', (0, 0), (0, 0), 4),
+            ('LEFTPADDING', (1, 0), (1, 0), 4), ('RIGHTPADDING', (1, 0), (1, 0), 8),
         ]))
         
         story.append(cards_table)
@@ -626,8 +663,8 @@ class UltimatePDFGenerator:
         analysis_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), self.colors['gray_50']),
             ('BOX', (0, 0), (-1, -1), 1, self.colors['primary_light']),
-            ('PADDING', (0, 0), (-1, -1), 20),
-            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [10, 10, 10, 10]),
+            ('PADDING', (0, 0), (-1, -1), 15),
+            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
         ]))
         
         story.append(analysis_table)
@@ -652,9 +689,9 @@ class UltimatePDFGenerator:
         disclaimer_table = Table([[Paragraph(disclaimer_content, self.styles['disclaimer'])]], colWidths=[6.5*inch])
         disclaimer_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), self.colors['warning_ultra_light']),
-            ('BOX', (0, 0), (-1, -1), 2, self.colors['warning']),
-            ('PADDING', (0, 0), (-1, -1), 16),
-            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [10, 10, 10, 10]),
+            ('BOX', (0, 0), (-1, -1), 1, self.colors['warning']),
+            ('PADDING', (0, 0), (-1, -1), 12),
+            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
         ]))
         
         story.append(disclaimer_table)
@@ -686,32 +723,38 @@ class UltimatePDFGenerator:
         story.append(Paragraph("🔬 Detailed Technical Findings", self.styles['section_header']))
         
         detailed_findings_data = [
-            [Paragraph("<b>Finding</b>", self.styles['meta_label']), Paragraph("<b>Status</b>", self.styles['meta_label']), Paragraph("<b>AI-Generated Details</b>", self.styles['meta_label'])]
+            [Paragraph("<b>Medical Finding</b>", self.styles['table_header']), 
+             Paragraph("<b>Detection Status</b>", self.styles['table_header']), 
+             Paragraph("<b>AI-Generated Clinical Details</b>", self.styles['table_header'])]
         ]
         
         is_detected = "detected" in findings.impression.lower() and "not detected" not in findings.impression.lower()
 
         if is_detected:
-            finding_name = findings.impression.replace(" Detected", "")
-            status_p = Paragraph(f'<font color="{self.colors["danger"].hexval()}"><b>Present</b></font>', self.styles['body'])
-            details_text = "<br/>".join(findings.abnormalities)
+            finding_name = findings.impression.replace(" Detected", "").replace("_", " ").title()
+            status_content = f'<font color="{self.colors["danger"].hexval()}"><b>⚠️ DETECTED</b></font>'
+            status_p = Paragraph(status_content, self.styles['finding_status'])
+            details_text = "<br/>".join([f"• {detail}" for detail in findings.abnormalities])
         else:
             finding_name = "Pneumothorax"
-            status_p = Paragraph(f'<font color="{self.colors["success_dark"].hexval()}">Not Detected</font>', self.styles['body'])
-            details_text = findings.abnormalities[0] if findings.abnormalities else "No abnormalities detected."
+            status_content = f'<font color="{self.colors["success_dark"].hexval()}"><b>✅ NOT DETECTED</b></font>'
+            status_p = Paragraph(status_content, self.styles['finding_status'])
+            details_text = f"• {findings.abnormalities[0]}" if findings.abnormalities else "• No abnormalities detected in the chest X-ray analysis."
 
+        finding_p = Paragraph(finding_name, self.styles['body'])
         details_p = Paragraph(details_text, self.styles['body'])
-        detailed_findings_data.append([Paragraph(finding_name, self.styles['body']), status_p, details_p])
+        detailed_findings_data.append([finding_p, status_p, details_p])
 
-        findings_table = Table(detailed_findings_data, colWidths=[1.5*inch, 1.2*inch, 3.8*inch])
+        findings_table = Table(detailed_findings_data, colWidths=[1.4*inch, 1.3*inch, 3.8*inch])
         findings_table.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('GRID', (0, 0), (-1, -1), 1, self.colors['gray_200']),
-            ('BACKGROUND', (0, 0), (-1, 0), self.colors['gray_100']),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
-            ('TOPPADDING', (0, 0), (-1, -1), 10),
-            ('LEFTPADDING', (0, 0), (-1, -1), 12),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 12),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('GRID', (0, 0), (-1, -1), 0.5, self.colors['gray_300']),
+            ('BACKGROUND', (0, 0), (-1, 0), self.colors['primary_ultra_light']),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('LEFTPADDING', (0, 0), (-1, -1), 10),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [self.colors['white'], self.colors['gray_50']]),
         ]))
         
         story.append(findings_table)
@@ -719,13 +762,27 @@ class UltimatePDFGenerator:
 
         # === CLINICAL RECOMMENDATIONS ===
         story.append(Paragraph("💡 Clinical Recommendations & Next Steps", self.styles['section_header']))
-        recommendation_text = """
-        The findings presented in this report are generated by an artificial intelligence model and must be used as a
-        supplementary clinical decision support tool. It is imperative that these results are <b>reviewed and validated by a qualified radiologist or physician.</b>
-        Clinical correlation with the patient's history, symptoms, and other diagnostic tests is essential for a definitive diagnosis.
-        The AI model's confidence level indicates the model's certainty in its finding, not a clinical probability or diagnostic certainty.
-        """
-        story.append(Paragraph(recommendation_text, self.styles['body']))
+        
+        # Create a professional recommendations section
+        recommendations_data = [
+            [Paragraph("<b>📋 Professional Review Required</b>", self.styles['subsection_header'])],
+            [Paragraph("All AI-generated findings must be reviewed and validated by a qualified radiologist or licensed physician before making any clinical decisions.", self.styles['body'])],
+            [Paragraph("<b>⚕️ Clinical Correlation Essential</b>", self.styles['subsection_header'])],
+            [Paragraph("Diagnostic findings should be correlated with patient history, physical examination, symptoms, and additional diagnostic tests as clinically indicated.", self.styles['body'])],
+            [Paragraph("<b>🎯 AI Confidence Interpretation</b>", self.styles['subsection_header'])],
+            [Paragraph("The AI confidence level represents the model's algorithmic certainty in pattern recognition, not clinical probability or diagnostic certainty.", self.styles['body'])]
+        ]
+        
+        recommendations_table = Table(recommendations_data, colWidths=[6.5*inch])
+        recommendations_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), self.colors['primary_ultra_light']),
+            ('BOX', (0, 0), (-1, -1), 1, self.colors['primary_light']),
+            ('PADDING', (0, 0), (-1, -1), 12),
+            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ]))
+        
+        story.append(recommendations_table)
 
         doc.build(story, onFirstPage=self._draw_page_template, onLaterPages=self._draw_page_template)
         
