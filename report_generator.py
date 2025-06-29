@@ -487,15 +487,15 @@ class UltimatePDFGenerator:
             value_color = self.colors['primary_dark']
         
         value_style = ParagraphStyle(
-            'CardValue', parent=self.styles['stat_value'], textColor=value_color, fontSize=20, leading=24
+            'CardValue', parent=self.styles['stat_value'], textColor=value_color, fontSize=16, leading=20, wordWrap='CJK'
         )
         label_style = ParagraphStyle(
-            'CardLabel', parent=self.styles['stat_label'], textColor=self.colors['gray_600'], fontSize=10, leading=14
+            'CardLabel', parent=self.styles['stat_label'], textColor=self.colors['gray_600'], fontSize=10, leading=14, wordWrap='CJK'
         )
         
         card_content = [
             [Paragraph(f"{icon}", ParagraphStyle('Icon', fontSize=16, alignment=TA_CENTER, spaceAfter=6))],
-            [Paragraph(str(value), value_style)],
+            [Paragraph(str(value).replace('\n', ' ').strip(), value_style)],
             [Paragraph(label, label_style)]
         ]
         
@@ -630,7 +630,7 @@ class UltimatePDFGenerator:
         
         stat_cards = [
             self._create_premium_stat_card(
-                findings.impression.title().replace('_', ' '), 
+                findings.impression.title().replace('_', ' ').replace(' Detected', '').strip(), 
                 "Clinical Impression", 
                 impression_color, 
                 impression_icon
@@ -731,7 +731,11 @@ class UltimatePDFGenerator:
         is_detected = "detected" in findings.impression.lower() and "not detected" not in findings.impression.lower()
 
         if is_detected:
-            finding_name = findings.impression.replace(" Detected", "").replace("_", " ").title()
+            # Clean up the finding name to avoid line breaks
+            finding_name = findings.impression.replace(" Detected", "").replace("_", " ").replace("\n", " ").strip().title()
+            # Ensure it's a single line
+            if len(finding_name) > 20:
+                finding_name = "Pneumothorax"
             status_content = f'<font color="{self.colors["danger"].hexval()}"><b>DETECTED</b></font>'
             status_p = Paragraph(status_content, self.styles['finding_status'])
             details_text = "<br/>".join([f"• {detail}" for detail in findings.abnormalities])
