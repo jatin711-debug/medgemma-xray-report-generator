@@ -317,7 +317,12 @@ class MedicalImageAnalyzer:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Analyze this chest image for pneumothorax detection. First, clearly state if pneumothorax is detected or not detected with a confidence percentage. If none detected, state 'No pneumothorax detected' with confidence level. Then provide a brief radiological analysis noting any other visible abnormalities and conclude with a final clinical impression."},
+                        {"type": "text", "text": "Analyze the provided image for pneumothorax. "
+                                                "Your response must be strictly one of the following: "
+                                                "'Pneumothorax detected' or 'No pneumothorax detected'. "
+                                                "Follow this with the confidence level, like 'Confidence: XX%'."
+                                                "Provide no other text or explanation."
+                                                },
                         {"type": "image", "image": image_for_model}
                     ]
                 }
