@@ -487,7 +487,13 @@ class UltimatePDFGenerator:
             value_color = self.colors['primary_dark']
         
         value_style = ParagraphStyle(
-            'CardValue', parent=self.styles['stat_value'], textColor=value_color, fontSize=16, leading=20, wordWrap='CJK'
+            'CardValue', 
+            parent=self.styles['stat_value'], 
+            textColor=value_color, 
+            fontSize=13, 
+            leading=16, 
+            wordWrap='CJK',
+            alignment=TA_CENTER
         )
         label_style = ParagraphStyle(
             'CardLabel', parent=self.styles['stat_label'], textColor=self.colors['gray_600'], fontSize=10, leading=14, wordWrap='CJK'
@@ -499,14 +505,14 @@ class UltimatePDFGenerator:
             [Paragraph(label, label_style)]
         ]
         
-        card_table = Table(card_content, colWidths=[2.4 * inch])
+        card_table = Table(card_content, colWidths=[2.6 * inch])
         card_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), bg_color),
             ('BOX', (0, 0), (-1, -1), 2, border_color),
-            ('TOPPADDING', (0, 0), (-1, -1), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
-            ('LEFTPADDING', (0, 0), (-1, -1), 10),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+            ('TOPPADDING', (0, 0), (-1, -1), 14),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 14),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
@@ -630,7 +636,7 @@ class UltimatePDFGenerator:
         
         stat_cards = [
             self._create_premium_stat_card(
-                findings.impression.title().replace('_', ' ').replace(' Detected', '').strip(), 
+                findings.impression.title().replace('_', ' '), 
                 "Clinical Impression", 
                 impression_color, 
                 impression_icon
@@ -731,16 +737,13 @@ class UltimatePDFGenerator:
         is_detected = "detected" in findings.impression.lower() and "not detected" not in findings.impression.lower()
 
         if is_detected:
-            # Clean up the finding name to avoid line breaks
-            finding_name = findings.impression.replace(" Detected", "").replace("_", " ").replace("\n", " ").strip().title()
-            # Ensure it's a single line
-            if len(finding_name) > 20:
-                finding_name = "Pneumothorax"
+            # Keep the full finding name as it comes from the AI
+            finding_name = findings.impression.replace("_", " ").replace("\n", " ").strip().title()
             status_content = f'<font color="{self.colors["danger"].hexval()}"><b>DETECTED</b></font>'
             status_p = Paragraph(status_content, self.styles['finding_status'])
             details_text = "<br/>".join([f"• {detail}" for detail in findings.abnormalities])
         else:
-            finding_name = "Pneumothorax"
+            finding_name = findings.impression.replace("_", " ").replace("\n", " ").strip().title()
             status_content = f'<font color="{self.colors["success_dark"].hexval()}"><b>NOT DETECTED</b></font>'
             status_p = Paragraph(status_content, self.styles['finding_status'])
             details_text = f"• {findings.abnormalities[0]}" if findings.abnormalities else "• No abnormalities detected in the chest X-ray analysis."
