@@ -202,8 +202,8 @@ class UltimatePDFGenerator:
                 fontName=self.font_display,
                 fontSize=16,
                 textColor=self.colors['primary'],
-                spaceBefore=18,
-                spaceAfter=8,
+                spaceBefore=22,
+                spaceAfter=12,
                 leading=20,
                 alignment=TA_LEFT,
                 wordWrap='CJK'
@@ -228,8 +228,8 @@ class UltimatePDFGenerator:
                 fontName=self.font_body,
                 fontSize=10,
                 textColor=self.colors['gray_700'],
-                leading=14,
-                spaceAfter=6,
+                leading=16,
+                spaceAfter=8,
                 alignment=TA_JUSTIFY,
                 leftIndent=0,
                 rightIndent=0,
@@ -509,10 +509,10 @@ class UltimatePDFGenerator:
         card_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), bg_color),
             ('BOX', (0, 0), (-1, -1), 2, border_color),
-            ('TOPPADDING', (0, 0), (-1, -1), 14),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 14),
-            ('LEFTPADDING', (0, 0), (-1, -1), 8),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+            ('TOPPADDING', (0, 0), (-1, -1), 18),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 18),
+            ('LEFTPADDING', (0, 0), (-1, -1), 10),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 10),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
@@ -556,9 +556,9 @@ class UltimatePDFGenerator:
         meta_table = Table(styled_rows, colWidths=[0.3*inch, 1.2*inch, None])
         meta_table.setStyle(TableStyle([
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('PADDING', (0, 0), (-1, -1), 6),
-            ('LEFTPADDING', (0, 0), (0, -1), 3),
-            ('RIGHTPADDING', (-1, 0), (-1, -1), 3),
+            ('PADDING', (0, 0), (-1, -1), 8),
+            ('LEFTPADDING', (0, 0), (0, -1), 4),
+            ('RIGHTPADDING', (-1, 0), (-1, -1), 4),
             ('LINEBELOW', (0, 0), (-1, -2), 0.5, self.colors['gray_200']),
             ('BACKGROUND', (0, 0), (-1, -1), self.colors['gray_50']),
             ('ROUNDEDCORNERS', (0, 0), (-1, -1), [6, 6, 6, 6]),
@@ -616,17 +616,17 @@ class UltimatePDFGenerator:
         findings = analysis_response.findings
         
         # === COVER PAGE ===
-        story.append(Spacer(1, 15))
+        story.append(Spacer(1, 25))
         story.append(Paragraph("PNEUMOTHORAX", self.styles['hero_title']))
         story.append(Paragraph("DIAGNOSTIC ANALYSIS REPORT", self.styles['main_title']))
-        story.append(Spacer(1, 5))
+        story.append(Spacer(1, 12))
         
         story.append(Paragraph(
             "Advanced AI-Powered Medical Imaging Analysis with Confidence Assessment and Clinical Decision Support",
             self.styles['subtitle']
         ))
         
-        story.append(Spacer(1, 20))
+        story.append(Spacer(1, 35))
         
         impression_icon = "🚨" if "DETECTED" in findings.impression.upper() else "📊"
         confidence_icon = "🎯"
@@ -656,11 +656,11 @@ class UltimatePDFGenerator:
         ]))
         
         story.append(cards_table)
-        story.append(Spacer(1, 25))
+        story.append(Spacer(1, 40))
         
         story.append(Paragraph("📋 Analysis Metadata", self.styles['section_header']))
         story.append(self._create_metadata_section(analysis_response))
-        story.append(Spacer(1, 20))
+        story.append(Spacer(1, 35))
         
         story.append(Paragraph("🧠 AI Analysis Output", self.styles['section_header']))
         analysis_text = analysis_response.raw_response.replace('\n\n', '<br/><br/>').replace('\n', ' ')
@@ -669,12 +669,12 @@ class UltimatePDFGenerator:
         analysis_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), self.colors['gray_50']),
             ('BOX', (0, 0), (-1, -1), 1, self.colors['primary_light']),
-            ('PADDING', (0, 0), (-1, -1), 15),
+            ('PADDING', (0, 0), (-1, -1), 18),
             ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
         ]))
         
         story.append(analysis_table)
-        story.append(Spacer(1, 20))
+        story.append(Spacer(1, 35))
         
         story.append(Paragraph("⚖️ Medical & Legal Disclaimer", self.styles['section_header']))
         disclaimer_content = """
@@ -696,12 +696,12 @@ class UltimatePDFGenerator:
         disclaimer_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), self.colors['warning_ultra_light']),
             ('BOX', (0, 0), (-1, -1), 1, self.colors['warning']),
-            ('PADDING', (0, 0), (-1, -1), 12),
+            ('PADDING', (0, 0), (-1, -1), 16),
             ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
         ]))
         
         story.append(disclaimer_table)
-        story.append(Spacer(1, 15))
+        story.append(Spacer(1, 25))
         
         # === VISUAL ANALYSIS & FINDINGS ON SAME PAGE ===
         story.append(Paragraph("👁️ Visual Analysis & Heatmap", self.styles['section_header']))
@@ -719,11 +719,11 @@ class UltimatePDFGenerator:
         image_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('BOTTOMPADDING', (0, 0), (1, 0), 8),
+            ('BOTTOMPADDING', (0, 0), (1, 0), 12),
         ]))
         
         story.append(KeepTogether(image_table))
-        story.append(Spacer(1, 15))
+        story.append(Spacer(1, 25))
 
         # === DETAILED FINDINGS SECTION ===
         story.append(Paragraph("🔬 Detailed Technical Findings", self.styles['section_header']))
@@ -757,15 +757,15 @@ class UltimatePDFGenerator:
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('GRID', (0, 0), (-1, -1), 0.5, self.colors['gray_300']),
             ('BACKGROUND', (0, 0), (-1, 0), self.colors['primary_ultra_light']),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-            ('TOPPADDING', (0, 0), (-1, -1), 8),
-            ('LEFTPADDING', (0, 0), (-1, -1), 10),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+            ('TOPPADDING', (0, 0), (-1, -1), 12),
+            ('LEFTPADDING', (0, 0), (-1, -1), 12),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 12),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [self.colors['white'], self.colors['gray_50']]),
         ]))
         
         story.append(findings_table)
-        story.append(Spacer(1, 15))
+        story.append(Spacer(1, 25))
 
         # === CLINICAL RECOMMENDATIONS ===
         story.append(Paragraph("💡 Clinical Recommendations & Next Steps", self.styles['section_header']))
@@ -781,7 +781,7 @@ class UltimatePDFGenerator:
         recommendations_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), self.colors['primary_ultra_light']),
             ('BOX', (0, 0), (-1, -1), 1, self.colors['primary_light']),
-            ('PADDING', (0, 0), (-1, -1), 10),
+            ('PADDING', (0, 0), (-1, -1), 14),
             ('ROUNDEDCORNERS', (0, 0), (-1, -1), [6, 6, 6, 6]),
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ]))
