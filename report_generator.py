@@ -202,8 +202,8 @@ class UltimatePDFGenerator:
                 fontName=self.font_display,
                 fontSize=16,
                 textColor=self.colors['primary'],
-                spaceBefore=24,
-                spaceAfter=10,
+                spaceBefore=18,
+                spaceAfter=8,
                 leading=20,
                 alignment=TA_LEFT,
                 wordWrap='CJK'
@@ -215,8 +215,8 @@ class UltimatePDFGenerator:
                 fontName=self.font_body_bold,
                 fontSize=12,
                 textColor=self.colors['gray_700'],
-                spaceBefore=14,
-                spaceAfter=6,
+                spaceBefore=10,
+                spaceAfter=4,
                 leading=16,
                 alignment=TA_LEFT,
                 wordWrap='CJK'
@@ -228,8 +228,8 @@ class UltimatePDFGenerator:
                 fontName=self.font_body,
                 fontSize=10,
                 textColor=self.colors['gray_700'],
-                leading=15,
-                spaceAfter=8,
+                leading=14,
+                spaceAfter=6,
                 alignment=TA_JUSTIFY,
                 leftIndent=0,
                 rightIndent=0,
@@ -499,17 +499,17 @@ class UltimatePDFGenerator:
             [Paragraph(label, label_style)]
         ]
         
-        card_table = Table(card_content, colWidths=[2.6 * inch])
+        card_table = Table(card_content, colWidths=[2.4 * inch])
         card_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), bg_color),
             ('BOX', (0, 0), (-1, -1), 2, border_color),
-            ('TOPPADDING', (0, 0), (-1, -1), 15),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 15),
-            ('LEFTPADDING', (0, 0), (-1, -1), 12),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 12),
+            ('TOPPADDING', (0, 0), (-1, -1), 12),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+            ('LEFTPADDING', (0, 0), (-1, -1), 10),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 10),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [10, 10, 10, 10]),
+            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
         ]))
         
         return card_table
@@ -610,19 +610,19 @@ class UltimatePDFGenerator:
         findings = analysis_response.findings
         
         # === COVER PAGE ===
-        story.append(Spacer(1, 20))
+        story.append(Spacer(1, 15))
         story.append(Paragraph("PNEUMOTHORAX", self.styles['hero_title']))
         story.append(Paragraph("DIAGNOSTIC ANALYSIS REPORT", self.styles['main_title']))
-        story.append(Spacer(1, 8))
+        story.append(Spacer(1, 5))
         
         story.append(Paragraph(
             "Advanced AI-Powered Medical Imaging Analysis with Confidence Assessment and Clinical Decision Support",
             self.styles['subtitle']
         ))
         
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 20))
         
-        impression_icon = "🚨" if "DETECTED" in findings.impression.upper() else "✅"
+        impression_icon = "🚨" if "DETECTED" in findings.impression.upper() else "📊"
         confidence_icon = "🎯"
         
         impression_color = 'danger' if 'DETECTED' in findings.impression.upper() else 'success'
@@ -643,18 +643,18 @@ class UltimatePDFGenerator:
             )
         ]
         
-        cards_table = Table([stat_cards], colWidths=[2.8*inch, 2.8*inch], hAlign='CENTER')
+        cards_table = Table([stat_cards], colWidths=[2.6*inch, 2.6*inch], hAlign='CENTER')
         cards_table.setStyle(TableStyle([
-            ('LEFTPADDING', (0, 0), (0, 0), 8), ('RIGHTPADDING', (0, 0), (0, 0), 4),
-            ('LEFTPADDING', (1, 0), (1, 0), 4), ('RIGHTPADDING', (1, 0), (1, 0), 8),
+            ('LEFTPADDING', (0, 0), (0, 0), 6), ('RIGHTPADDING', (0, 0), (0, 0), 3),
+            ('LEFTPADDING', (1, 0), (1, 0), 3), ('RIGHTPADDING', (1, 0), (1, 0), 6),
         ]))
         
         story.append(cards_table)
-        story.append(Spacer(1, 40))
+        story.append(Spacer(1, 25))
         
         story.append(Paragraph("📋 Analysis Metadata", self.styles['section_header']))
         story.append(self._create_metadata_section(analysis_response))
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 20))
         
         story.append(Paragraph("🧠 AI Analysis Output", self.styles['section_header']))
         analysis_text = analysis_response.raw_response.replace('\n\n', '<br/><br/>').replace('\n', ' ')
@@ -668,7 +668,7 @@ class UltimatePDFGenerator:
         ]))
         
         story.append(analysis_table)
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 20))
         
         story.append(Paragraph("⚖️ Medical & Legal Disclaimer", self.styles['section_header']))
         disclaimer_content = """
@@ -695,12 +695,12 @@ class UltimatePDFGenerator:
         ]))
         
         story.append(disclaimer_table)
-        story.append(PageBreak())
+        story.append(Spacer(1, 15))
         
-        # === VISUAL ANALYSIS PAGE ===
+        # === VISUAL ANALYSIS & FINDINGS ON SAME PAGE ===
         story.append(Paragraph("👁️ Visual Analysis & Heatmap", self.styles['section_header']))
         
-        img_max_width = 3.2 * inch
+        img_max_width = 2.8 * inch
         rl_original_image = self._pil_to_reportlab_image(original_image, max_width=img_max_width)
         rl_heatmap_image = self._pil_to_reportlab_image(heatmap_image, max_width=img_max_width)
         
@@ -709,15 +709,15 @@ class UltimatePDFGenerator:
             [Paragraph("Original Chest X-Ray", self.styles['caption']), Paragraph("AI Attention Heatmap", self.styles['caption'])]
         ]
         
-        image_table = Table(image_table_data, colWidths=[3.4*inch, 3.4*inch])
+        image_table = Table(image_table_data, colWidths=[3.0*inch, 3.0*inch])
         image_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('BOTTOMPADDING', (0, 0), (1, 0), 12),
+            ('BOTTOMPADDING', (0, 0), (1, 0), 8),
         ]))
         
         story.append(KeepTogether(image_table))
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 15))
 
         # === DETAILED FINDINGS SECTION ===
         story.append(Paragraph("🔬 Detailed Technical Findings", self.styles['section_header']))
@@ -732,12 +732,12 @@ class UltimatePDFGenerator:
 
         if is_detected:
             finding_name = findings.impression.replace(" Detected", "").replace("_", " ").title()
-            status_content = f'<font color="{self.colors["danger"].hexval()}"><b>⚠️ DETECTED</b></font>'
+            status_content = f'<font color="{self.colors["danger"].hexval()}"><b>DETECTED</b></font>'
             status_p = Paragraph(status_content, self.styles['finding_status'])
             details_text = "<br/>".join([f"• {detail}" for detail in findings.abnormalities])
         else:
             finding_name = "Pneumothorax"
-            status_content = f'<font color="{self.colors["success_dark"].hexval()}"><b>✅ NOT DETECTED</b></font>'
+            status_content = f'<font color="{self.colors["success_dark"].hexval()}"><b>NOT DETECTED</b></font>'
             status_p = Paragraph(status_content, self.styles['finding_status'])
             details_text = f"• {findings.abnormalities[0]}" if findings.abnormalities else "• No abnormalities detected in the chest X-ray analysis."
 
@@ -758,27 +758,24 @@ class UltimatePDFGenerator:
         ]))
         
         story.append(findings_table)
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 15))
 
         # === CLINICAL RECOMMENDATIONS ===
         story.append(Paragraph("💡 Clinical Recommendations & Next Steps", self.styles['section_header']))
         
-        # Create a professional recommendations section
+        # Create a more compact recommendations section
         recommendations_data = [
-            [Paragraph("<b>📋 Professional Review Required</b>", self.styles['subsection_header'])],
-            [Paragraph("All AI-generated findings must be reviewed and validated by a qualified radiologist or licensed physician before making any clinical decisions.", self.styles['body'])],
-            [Paragraph("<b>⚕️ Clinical Correlation Essential</b>", self.styles['subsection_header'])],
-            [Paragraph("Diagnostic findings should be correlated with patient history, physical examination, symptoms, and additional diagnostic tests as clinically indicated.", self.styles['body'])],
-            [Paragraph("<b>🎯 AI Confidence Interpretation</b>", self.styles['subsection_header'])],
-            [Paragraph("The AI confidence level represents the model's algorithmic certainty in pattern recognition, not clinical probability or diagnostic certainty.", self.styles['body'])]
+            [Paragraph("<b>📋 Professional Review Required:</b> All AI-generated findings must be reviewed and validated by a qualified radiologist or licensed physician before making any clinical decisions.", self.styles['body'])],
+            [Paragraph("<b>⚕️ Clinical Correlation Essential:</b> Diagnostic findings should be correlated with patient history, physical examination, symptoms, and additional diagnostic tests as clinically indicated.", self.styles['body'])],
+            [Paragraph("<b>🎯 AI Confidence Interpretation:</b> The AI confidence level represents the model's algorithmic certainty in pattern recognition, not clinical probability or diagnostic certainty.", self.styles['body'])]
         ]
         
         recommendations_table = Table(recommendations_data, colWidths=[6.5*inch])
         recommendations_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), self.colors['primary_ultra_light']),
             ('BOX', (0, 0), (-1, -1), 1, self.colors['primary_light']),
-            ('PADDING', (0, 0), (-1, -1), 12),
-            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
+            ('PADDING', (0, 0), (-1, -1), 10),
+            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [6, 6, 6, 6]),
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ]))
         
