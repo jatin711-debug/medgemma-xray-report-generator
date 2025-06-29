@@ -240,11 +240,11 @@ class MedicalImageAnalyzer:
             self.processor = AutoProcessor.from_pretrained(self.model_id)
             
             # Comprehensive fallback system for attention implementations
-            # Priority order: flash_attention_2 > sdpa > eager (most reliable)
+            # Priority order: sdpa > eager (most reliable)
             attention_implementations = []
             
             if torch.cuda.is_available():
-                attention_implementations = ["flash_attention_2", "sdpa", "eager"]
+                attention_implementations = ["sdpa", "eager"]
             else:
                 attention_implementations = ["sdpa", "eager"]
             
@@ -490,10 +490,19 @@ class MedicalImageAnalyzer:
             attention_map = avg_attentions.squeeze(0).cpu().detach()
             logger.info(f"Shape of final attention_map: {attention_map.shape}")
 
-            # For ViT-based models, the image is divided into a grid of patches.
-            # A common configuration is a 16x16 grid, resulting in 256 patches/tokens.
-            num_image_patches = 256
-            grid_size = 16
+            # For SigLIP vision encoder, get the actual grid size from the processor
+            try:
+                # SigLIP uses a configurable patch size and image size
+                image_size = self.processor.image_processor.size['height']  # Usually 224 or 384
+                patch_size = self.processor.image_processor.patch_size  # Usually 16
+                grid_size = image_size // patch_size  # e.g., 224//16 = 14 or 384//16 = 24
+                num_image_patches = grid_size * grid_size
+                logger.info(f"SigLIP config: image_size={image_size}, patch_size={patch_size}, grid_size={grid_size}")
+            except Exception as e:
+                logger.warning(f"Could not get SigLIP config, using defaults: {e}")
+                # Fallback to common configuration
+                grid_size = 14  # More common for SigLIP than 16
+                num_image_patches = grid_size * grid_size
             
             seq_len = attention_map.shape[0]
             num_text_tokens = seq_len - num_image_patches
@@ -557,7 +566,7 @@ class MedicalImageAnalyzer:
         # Apply a Gaussian blur to smooth the edges of the heatmap for a more polished look
         heatmap_blurred = cv2.GaussianBlur(heatmap_resized, (25, 25), 0)
         
-        # Apply a color map that resembles the desired output (hot -> cold)
+        # Apply a color map that creates blue-to-red gradient like the reference image
         heatmap_colored = cv2.applyColorMap(heatmap_blurred, cv2.COLORMAP_JET)
         
         # Convert PIL image to OpenCV format
