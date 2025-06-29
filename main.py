@@ -237,7 +237,7 @@ class MedicalImageAnalyzer:
             logger.info(f"Attempting to load model on device='{device}' with dtype='{torch_dtype}'")
 
             # 5. Load the processor and the model with recommended settings
-            self.processor = AutoProcessor.from_pretrained(self.model_id)
+            self.processor = AutoProcessor.from_pretrained(self.model_id, use_fast=True)
             
             # Comprehensive fallback system for attention implementations
             # Priority order: eager (required for output_attentions=True)
