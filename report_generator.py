@@ -599,8 +599,14 @@ class UltimatePDFGenerator:
 
         return ReportLabImage(img_buffer, width=width, height=height)
 
-    def generate_pdf_report(self, analysis_response, original_image: Image.Image, heatmap_image: Image.Image) -> str:
-        """Generate the most beautiful medical PDF report ever created"""
+    def generate_pdf_report(self,
+                            analysis_response,
+                            original_image: Image.Image,
+                            ai_attention_heatmap_image: Image.Image,
+                            new_saliency_map_image: Image.Image,
+                            probability_map_image: Image.Image,
+                            segmentation_map_image: Image.Image) -> str:
+        """Generate the most beautiful medical PDF report ever created, now with more maps!"""
         
         filename = f"premium_medical_report_{analysis_response.analysis_id}.pdf"
         filepath = os.path.join(self.reports_dir, filename)
@@ -704,25 +710,48 @@ class UltimatePDFGenerator:
         story.append(Spacer(1, 25))
         
         # === VISUAL ANALYSIS & FINDINGS ON SAME PAGE ===
-        story.append(Paragraph("👁️ Visual Analysis & Heatmap", self.styles['section_header']))
+        story.append(Paragraph("👁️ Visual Analysis & Diagnostic Maps", self.styles['section_header']))
         
-        img_max_width = 2.8 * inch
+        # Adjust image width to fit 5 images. Total available width is approx 7.5in - margins = 6.5in
+        # Let's try 1.2 inch per image, leaving some space for padding.
+        img_max_width = 1.2 * inch
+        
         rl_original_image = self._pil_to_reportlab_image(original_image, max_width=img_max_width)
-        rl_heatmap_image = self._pil_to_reportlab_image(heatmap_image, max_width=img_max_width)
-        
+        rl_ai_attention_heatmap_image = self._pil_to_reportlab_image(ai_attention_heatmap_image, max_width=img_max_width)
+        rl_new_saliency_map_image = self._pil_to_reportlab_image(new_saliency_map_image, max_width=img_max_width)
+        rl_probability_map_image = self._pil_to_reportlab_image(probability_map_image, max_width=img_max_width)
+        rl_segmentation_map_image = self._pil_to_reportlab_image(segmentation_map_image, max_width=img_max_width)
+
         image_table_data = [
-            [rl_original_image, rl_heatmap_image],
-            [Paragraph("Original Chest X-Ray", self.styles['caption']), Paragraph("AI Attention Heatmap", self.styles['caption'])]
+            [
+                rl_original_image,
+                rl_ai_attention_heatmap_image,
+                rl_new_saliency_map_image,
+                rl_probability_map_image,
+                rl_segmentation_map_image
+            ],
+            [
+                Paragraph("Original X-Ray", self.styles['caption']),
+                Paragraph("AI Attention Heatmap", self.styles['caption']),
+                Paragraph("Saliency Map (Grayscale)", self.styles['caption']),
+                Paragraph("Probability Map", self.styles['caption']),
+                Paragraph("Segmentation Map", self.styles['caption'])
+            ]
         ]
         
-        image_table = Table(image_table_data, colWidths=[3.0*inch, 3.0*inch])
+        # Total width for 5 images, each 1.2 inch, plus small gaps.
+        # (1.2 * 5) = 6.0 inch. Let's give a bit more for column spacing.
+        col_width_val = 1.25 * inch # A little more space for each image and its internal padding
+        image_table = Table(image_table_data, colWidths=[col_width_val] * 5)
         image_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('BOTTOMPADDING', (0, 0), (1, 0), 12),
+            ('LEFTPADDING', (0,0), (-1,-1), 2), # Small padding between images
+            ('RIGHTPADDING', (0,0), (-1,-1), 2),# Small padding between images
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 10), # Padding below images before caption
         ]))
         
-        story.append(KeepTogether(image_table))
+        story.append(KeepTogether(image_table)) # Keep images and captions together
         story.append(Spacer(1, 25))
 
         # === DETAILED FINDINGS SECTION ===

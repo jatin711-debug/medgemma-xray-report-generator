@@ -298,10 +298,11 @@ class MedicalImageAnalyzer:
                 confidence_level="Not available"
             )
     
-    async def analyze_image(self, image: Image.Image) -> tuple[str, RadiologyFindings, Image.Image]:
+    async def analyze_image(self, image: Image.Image) -> tuple[str, RadiologyFindings, Image.Image, Image.Image, Image.Image, Image.Image]:
         """
         Perform AI-powered medical image analysis using Med-GEMMA.
-        Returns raw text response, structured findings, and a heatmap overlay.
+        Returns raw text response, structured findings, AI Attention Heatmap,
+        New Saliency Map, Probability Map, and Segmentation Map.
         """
         await self.load_model()
 
@@ -334,8 +335,6 @@ class MedicalImageAnalyzer:
                 }
             ]
 
-
-            # Prepare inputs with processor
             inputs = self.processor.apply_chat_template(
                 messages,
                 add_generation_prompt=True,
@@ -348,39 +347,31 @@ class MedicalImageAnalyzer:
             attentions = None
 
             with torch.inference_mode():
-                # Method 1: Try to get attentions from a single forward pass first
                 try:
-                    # Get attention weights from forward pass (more reliable)
                     forward_outputs = self.model(
                         **inputs,
                         output_attentions=True,
-                        use_cache=False  # Disable cache to ensure attention computation
+                        use_cache=False
                     )
-                    
                     if hasattr(forward_outputs, 'attentions') and forward_outputs.attentions:
                         attentions = forward_outputs.attentions
                         logger.info(f"✅ Got attentions from forward pass: {len(attentions)} layers")
                     else:
                         logger.warning("No attentions from forward pass")
-                        
                 except Exception as e:
                     logger.warning(f"Forward pass failed: {e}")
 
-                # Generate the response
                 generation_output = self.model.generate(
                     **inputs,
                     max_new_tokens=512,
                     do_sample=False,
                     output_attentions=True,
                     return_dict_in_generate=True,
-                    use_cache=False  # Ensure clean generation
+                    use_cache=False
                 )
 
-                # Method 2: Try to get attentions from generation if forward pass failed
                 if attentions is None:
-                    # Check all possible attention attributes
                     attention_attrs = ['attentions', 'decoder_attentions', 'cross_attentions', 'encoder_attentions']
-                    
                     for attr_name in attention_attrs:
                         if hasattr(generation_output, attr_name):
                             attr_value = getattr(generation_output, attr_name)
@@ -388,18 +379,14 @@ class MedicalImageAnalyzer:
                                 attentions = attr_value
                                 logger.info(f"✅ Got attentions from generation.{attr_name}: {len(attentions) if hasattr(attentions, '__len__') else 'unknown length'}")
                                 break
-                    
                     if attentions is None:
                         logger.warning("No attentions found in generation output")
-                        # Debug what's available
                         available_attrs = [attr for attr in dir(generation_output) if not attr.startswith('_')]
                         logger.info(f"Available generation output attributes: {available_attrs}")
 
-            # Decode the generated response
             generation = generation_output.sequences[0][input_len:]
             raw_response = self.processor.decode(generation, skip_special_tokens=True)
 
-            # Debug attention information
             if attentions is not None:
                 logger.info(f"Attention info - Type: {type(attentions)}, Length: {len(attentions) if hasattr(attentions, '__len__') else 'No len'}")
                 if hasattr(attentions, '__len__') and len(attentions) > 0:
@@ -407,125 +394,244 @@ class MedicalImageAnalyzer:
                     if hasattr(first_attention, 'shape'):
                         logger.info(f"First attention shape: {first_attention.shape}")
             else:
-                logger.warning("⚠️  Still no attentions found - will create placeholder heatmap")
+                logger.warning("⚠️  Still no attentions found - will create placeholder maps")
 
-            # Generate heatmap overlay
-            heatmap_image = self._generate_heatmap(attentions, image)
+            # Generate various maps
+            # heatmap_raw_normalized is the key intermediate map (normalized attention)
+            heatmap_image, heatmap_raw_normalized = self._generate_heatmap_and_raw_normalized(attentions, image)
 
-            # Parse and return findings
+            if heatmap_raw_normalized is None: # Handle case where attention extraction failed
+                logger.warning("heatmap_raw_normalized is None. Generating placeholder for all maps.")
+                # Create a default small gray square as placeholder for heatmap_raw_normalized
+                # The size (e.g., 14x14) should ideally match what would have been the grid_size.
+                # Using a common fallback like 14x14.
+                heatmap_raw_normalized = np.ones((14, 14), dtype=np.float32) * 0.5
+                if heatmap_image is None: # If _generate_heatmap_and_raw_normalized also returned None for image
+                     heatmap_image = self._create_placeholder_heatmap(image)
+
+
+            new_saliency_map_image = self._generate_new_saliency_map(heatmap_raw_normalized, image.size)
+            probability_map_image = self._generate_probability_map(heatmap_raw_normalized, image.size)
+            segmentation_map_image = self._generate_segmentation_map(heatmap_raw_normalized, image)
+
             findings = self.parse_ai_response(raw_response)
-            return raw_response, findings, heatmap_image
+            return raw_response, findings, heatmap_image, new_saliency_map_image, probability_map_image, segmentation_map_image
 
         except Exception as e:
             logger.error(f"Error during image analysis: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+            # Return placeholders if analysis fails critically before map generation
+            placeholder_img = self._create_placeholder_heatmap(image)
+            findings = RadiologyFindings(
+                anatomical_structures=["Error during analysis"],
+                abnormalities=[f"Error: {str(e)}"],
+                impression="Analysis Incomplete",
+                recommendations=["Review error logs"],
+                confidence_level="N/A"
+            )
+            # Ensure 6 items are returned by analyze_image in all paths
+            return f"Error: {str(e)}", findings, placeholder_img, placeholder_img, placeholder_img, placeholder_img
 
-    def _generate_heatmap(self, attentions: Optional[tuple], original_image: Image.Image) -> Image.Image:
+
+    def _generate_heatmap_and_raw_normalized(self, attentions: Optional[tuple], original_image: Image.Image) -> tuple[Image.Image, Optional[np.ndarray]]:
         """
-        Generates an accurate heatmap from attention weights and overlays it on the original image.
-        This version correctly processes attention from multi-layer, multi-head models like MedGemma
-        by averaging attention from text tokens to image patches.
+        Generates the primary AI Attention Heatmap (colored overlay) and also returns the
+        raw normalized heatmap (grayscale, 0-1 range) which serves as a base for other maps.
+        Returns (heatmap_overlay_image, heatmap_raw_normalized_numpy_array)
+        Returns (placeholder_overlay, None) or (placeholder_overlay, placeholder_raw_normalized) on error or no attention.
         """
         if not attentions or not hasattr(attentions, '__len__') or len(attentions) == 0:
-            logger.warning("No attention weights found or in invalid format. Creating placeholder heatmap.")
-            return self._create_placeholder_heatmap(original_image)
+            logger.warning("No attention weights. Creating placeholder heatmap and raw map.")
+            placeholder_heatmap_overlay = self._create_placeholder_heatmap(original_image)
+            # Create a simple placeholder raw map (e.g., a small gray square of a default grid size)
+            placeholder_raw_normalized = np.ones((14,14), dtype=np.float32) * 0.5
+            return placeholder_heatmap_overlay, placeholder_raw_normalized
 
         try:
-            logger.info(f"Initial attention type: {type(attentions)}, length: {len(attentions)}")
-            if len(attentions) > 0:
-                logger.info(f"Shape of first attention tensor: {attentions[0].shape}, dtype: {attentions[0].dtype}")
-
-            # attentions is a tuple of tensors, one for each layer.
-            # Shape of each tensor: (batch, heads, seq_len, seq_len).
-            
-            # Convert from bfloat16 if needed, as it's not widely supported for CPU operations
             if attentions[0].dtype == torch.bfloat16:
                 attentions = tuple(a.float() for a in attentions)
-                logger.info(f"Converted attentions to float32. New dtype: {attentions[0].dtype}")
-
-            # Stack all layer attentions: (layers, batch, heads, seq, seq)
+            
             stacked_attentions = torch.stack(attentions)
-            logger.info(f"Shape of stacked_attentions: {stacked_attentions.shape}")
-            
-            # Average over layers and heads to get a single attention map per batch item
-            # Resulting shape: (batch, seq, seq)
             avg_attentions = stacked_attentions.mean(dim=(0, 2))
-            logger.info(f"Shape of avg_attentions: {avg_attentions.shape}")
-            
-            # Assume batch size is 1 and move to CPU for numpy conversion
-            # Resulting shape: (seq, seq)
-            attention_map = avg_attentions.squeeze(0).cpu().detach()
-            logger.info(f"Shape of final attention_map: {attention_map.shape}")
+            attention_map_tensor = avg_attentions.squeeze(0).cpu().detach()
 
-            # For SigLIP vision encoder, get the actual grid size from the processor
             try:
-                # SigLIP uses a configurable patch size and image size
-                image_size = self.processor.image_processor.size['height']  # Usually 224 or 384
-                patch_size = self.processor.image_processor.patch_size  # Usually 16
-                grid_size = image_size // patch_size  # e.g., 224//16 = 14 or 384//16 = 24
+                image_size_proc = self.processor.image_processor.size['height']
+                patch_size_proc = self.processor.image_processor.patch_size
+                grid_size = image_size_proc // patch_size_proc
                 num_image_patches = grid_size * grid_size
-                logger.info(f"SigLIP config: image_size={image_size}, patch_size={patch_size}, grid_size={grid_size}")
-            except Exception as e:
-                logger.warning(f"Could not get SigLIP config, using defaults: {e}")
-                # Fallback to common configuration
-                grid_size = 14  # More common for SigLIP than 16
+            except Exception as e_proc:
+                logger.warning(f"Could not get SigLIP config from processor ({e_proc}), using defaults.")
+                grid_size = 14
                 num_image_patches = grid_size * grid_size
             
-            seq_len = attention_map.shape[0]
-            num_text_tokens = seq_len - num_image_patches
-            logger.info(f"Sequence length: {seq_len}, Num text tokens: {num_text_tokens}, Num image patches: {num_image_patches}")
-
-            if num_text_tokens < 1:
-                logger.warning(f"Sequence length ({seq_len}) is not larger than image patches ({num_image_patches}). "
-                               f"Cannot determine text tokens to generate heatmap.")
-                return self._create_placeholder_heatmap(original_image)
-
-            # We are interested in how much the text tokens (the prompt) attend to the image patch tokens.
-            # The image patches are usually appended at the end of the sequence.
-            # The text tokens are at the beginning.
-            # Slice the attention map to get attentions from text to image patches.
-            # Shape: (num_text_tokens, num_image_patches)
-            text_to_image_attention = attention_map[:num_text_tokens, num_text_tokens:]
-            logger.info(f"Shape of text_to_image_attention: {text_to_image_attention.shape}")
+            seq_len = attention_map_tensor.shape[0]
+            # Ensure num_text_tokens is calculated correctly based on actual sequence length from model
+            # The image patches might not always be 'num_image_patches' if seq_len is smaller
+            # This happens if the text part of the input is very short.
+            # The image patch tokens are generally at the end.
+            # Let's assume the image part is `num_image_patches` and text is `seq_len - num_image_patches`
+            # However, the actual number of image tokens in attention_map_tensor might be related to `grid_size*grid_size`
+            # The critical part is `text_to_image_attention = attention_map_tensor[:-num_image_patches, -num_image_patches:]`
+            # Let's assume the last `num_image_patches` tokens are image tokens.
             
-            # Average the attention from all text tokens to each image patch.
-            # This gives a single score per image patch.
-            # Shape: (num_image_patches)
-            image_attention = text_to_image_attention.mean(dim=0)
-            logger.info(f"Shape of image_attention: {image_attention.shape}")
+            actual_num_image_tokens_in_map = num_image_patches
+            if seq_len < num_image_patches:
+                 logger.warning(f"Sequence length ({seq_len}) is smaller than expected image patches ({num_image_patches}). Adjusting.")
+                 actual_num_image_tokens_in_map = seq_len # Cannot have more image tokens than seq_len
+
+            num_text_tokens = seq_len - actual_num_image_tokens_in_map
             
-            if image_attention.shape[0] != num_image_patches:
+            if num_text_tokens < 1 : # No text tokens to average attention from
+                logger.warning(f"Not enough text tokens ({num_text_tokens}) for heatmap based on seq_len {seq_len} and image_tokens {actual_num_image_tokens_in_map}. Using placeholder.")
+                placeholder_heatmap_overlay = self._create_placeholder_heatmap(original_image)
+                placeholder_raw_normalized = np.ones((grid_size, grid_size), dtype=np.float32) * 0.5
+                return placeholder_heatmap_overlay, placeholder_raw_normalized
+
+            # Attention from text tokens to image tokens
+            # Text tokens are assumed to be first, image tokens last.
+            text_to_image_attention = attention_map_tensor[:num_text_tokens, -actual_num_image_tokens_in_map:]
+
+            if text_to_image_attention.shape[1] != num_image_patches: # Check if the slice width matches expected patches
+                 logger.warning(f"Sliced text_to_image_attention width ({text_to_image_attention.shape[1]}) "
+                                f"does not match num_image_patches ({num_image_patches}). Using placeholder.")
+                 placeholder_heatmap_overlay = self._create_placeholder_heatmap(original_image)
+                 placeholder_raw_normalized = np.ones((grid_size, grid_size), dtype=np.float32) * 0.5
+                 return placeholder_heatmap_overlay, placeholder_raw_normalized
+
+            image_attention = text_to_image_attention.mean(dim=0) # Average attention from all text tokens to each image patch
+
+            if image_attention.shape[0] != num_image_patches: # Final check on the vector length
                  logger.warning(f"Resulting image attention vector length ({image_attention.shape[0]}) "
-                                f"does not match num_image_patches ({num_image_patches}).")
-                 return self._create_placeholder_heatmap(original_image)
+                                f"does not match num_image_patches ({num_image_patches}). Using placeholder.")
+                 placeholder_heatmap_overlay = self._create_placeholder_heatmap(original_image)
+                 placeholder_raw_normalized = np.ones((grid_size, grid_size), dtype=np.float32) * 0.5
+                 return placeholder_heatmap_overlay, placeholder_raw_normalized
 
-            # Reshape the 1D attention vector into a 2D grid that matches the patch layout.
-            heatmap = image_attention.reshape(grid_size, grid_size).numpy()
+            heatmap_raw_np = image_attention.reshape(grid_size, grid_size).numpy()
 
-            # Create the visual heatmap overlay and return it.
-            return self._create_heatmap_overlay(heatmap, original_image)
+            if heatmap_raw_np.max() > heatmap_raw_np.min():
+                heatmap_raw_normalized = (heatmap_raw_np - heatmap_raw_np.min()) / (heatmap_raw_np.max() - heatmap_raw_np.min())
+            else:
+                heatmap_raw_normalized = np.zeros_like(heatmap_raw_np)
+
+            heatmap_overlay_image = self._create_heatmap_overlay(np.copy(heatmap_raw_np), original_image)
+
+            return heatmap_overlay_image, heatmap_raw_normalized
 
         except Exception as e:
-            logger.error(f"Error generating heatmap: {e}", exc_info=True)
-            return self._create_placeholder_heatmap(original_image)
+            logger.error(f"Error generating heatmap and raw normalized map: {e}", exc_info=True)
+            placeholder_heatmap_overlay = self._create_placeholder_heatmap(original_image)
+            # Attempt to create a placeholder raw map with a default grid size if possible
+            try:
+                gs = self.processor.image_processor.size['height'] // self.processor.image_processor.patch_size
+            except:
+                gs = 14 # Fallback grid size
+            placeholder_raw_normalized = np.ones((gs,gs), dtype=np.float32) * 0.5
+            return placeholder_heatmap_overlay, placeholder_raw_normalized
 
-    def _create_heatmap_overlay(self, heatmap: np.ndarray, original_image: Image.Image) -> Image.Image:
+    def _generate_new_saliency_map(self, heatmap_normalized_np: Optional[np.ndarray], target_size: tuple[int, int]) -> Image.Image:
+        """Generates a grayscale saliency map from the normalized heatmap."""
+        if heatmap_normalized_np is None:
+            logger.warning("heatmap_normalized_np is None for new saliency map. Returning placeholder.")
+            return Image.new("L", target_size, color=128) # Gray placeholder
+
+        try:
+            # Ensure heatmap_normalized_np is 2D
+            if heatmap_normalized_np.ndim != 2:
+                logger.error(f"heatmap_normalized_np is not 2D for saliency map, shape: {heatmap_normalized_np.shape}. Returning placeholder.")
+                return Image.new("L", target_size, color=128)
+
+            saliency_map_uint8 = np.uint8(255 * heatmap_normalized_np)
+            saliency_pil = Image.fromarray(saliency_map_uint8, mode='L')
+            return saliency_pil.resize(target_size, Image.Resampling.LANCZOS)
+        except Exception as e:
+            logger.error(f"Error generating new saliency map: {e}", exc_info=True)
+            return Image.new("L", target_size, color=128)
+
+
+    def _generate_probability_map(self, heatmap_normalized_np: Optional[np.ndarray], target_size: tuple[int, int]) -> Image.Image:
+        """Generates a grayscale probability map from the normalized heatmap."""
+        if heatmap_normalized_np is None:
+            logger.warning("heatmap_normalized_np is None for probability map. Returning placeholder.")
+            return Image.new("L", target_size, color=128)
+        try:
+            # Ensure heatmap_normalized_np is 2D
+            if heatmap_normalized_np.ndim != 2:
+                logger.error(f"heatmap_normalized_np is not 2D for probability map, shape: {heatmap_normalized_np.shape}. Returning placeholder.")
+                return Image.new("L", target_size, color=128)
+
+            prob_map_uint8 = np.uint8(255 * heatmap_normalized_np)
+            prob_pil = Image.fromarray(prob_map_uint8, mode='L')
+            return prob_pil.resize(target_size, Image.Resampling.LANCZOS)
+        except Exception as e:
+            logger.error(f"Error generating probability map: {e}", exc_info=True)
+            return Image.new("L", target_size, color=128)
+
+    def _generate_segmentation_map(self, heatmap_normalized_np: Optional[np.ndarray], original_image: Image.Image) -> Image.Image:
+        """Generates a segmentation map by thresholding the normalized heatmap and drawing contours."""
+        if heatmap_normalized_np is None:
+            logger.warning("heatmap_normalized_np is None for segmentation map. Returning original image as placeholder.")
+            return original_image.copy()
+
+        try:
+            # Ensure heatmap_normalized_np is 2D before resizing
+            if heatmap_normalized_np.ndim != 2:
+                logger.error(f"heatmap_normalized_np is not 2D for segmentation map, shape: {heatmap_normalized_np.shape}. Returning original image.")
+                return original_image.copy()
+
+            heatmap_resized_for_segmentation = cv2.resize(heatmap_normalized_np, original_image.size, interpolation=cv2.INTER_LINEAR)
+
+            # Ensure it's in 0-1 range before multiplying by 255
+            if heatmap_resized_for_segmentation.max() > 1.0 or heatmap_resized_for_segmentation.min() < 0.0:
+                 heatmap_resized_for_segmentation = np.clip(heatmap_resized_for_segmentation, 0.0, 1.0)
+
+            threshold_input = np.uint8(255 * heatmap_resized_for_segmentation)
+
+            # Otsu's thresholding might be more adaptive here
+            threshold_value_seg, binary_mask = cv2.threshold(threshold_input, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            # As an alternative, fixed percentile:
+            # threshold_value_fixed = np.percentile(heatmap_resized_for_segmentation, 85)
+            # _, binary_mask = cv2.threshold(threshold_input, int(255 * threshold_value_fixed), 255, cv2.THRESH_BINARY)
+
+            contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            original_cv_bgr = cv2.cvtColor(np.array(original_image.convert('RGB')), cv2.COLOR_RGB2BGR)
+            cv2.drawContours(original_cv_bgr, contours, -1, (0, 255, 0), 2) # Green contours
+
+            return Image.fromarray(cv2.cvtColor(original_cv_bgr, cv2.COLOR_BGR2RGB))
+        except Exception as e:
+            logger.error(f"Error generating segmentation map: {e}", exc_info=True)
+            return original_image.copy()
+
+    def _create_heatmap_overlay(self, heatmap_raw_np: np.ndarray, original_image: Image.Image) -> Image.Image:
         """
         Overlays a focused and visually appealing heatmap onto the original image.
+        This function now takes the raw numpy heatmap (not yet normalized for this specific overlay).
         """
-        logger.info(f"Heatmap stats before processing: min={heatmap.min():.4f}, max={heatmap.max():.4f}, mean={heatmap.mean():.4f}")
+        # Ensure heatmap_raw_np is 2D
+        if heatmap_raw_np.ndim != 2:
+            logger.error(f"heatmap_raw_np for overlay is not 2D, shape: {heatmap_raw_np.shape}. Creating placeholder.")
+            return self._create_placeholder_heatmap(original_image) # Fallback to full placeholder logic
 
-        # Threshold to keep only the top 5% of attention scores for a sharper, more focused heatmap
-        threshold_value = np.percentile(heatmap, 95)
-        heatmap[heatmap < threshold_value] = 0
+        logger.info(f"Heatmap stats for overlay: min={heatmap_raw_np.min():.4f}, max={heatmap_raw_np.max():.4f}, mean={heatmap_raw_np.mean():.4f}")
 
-        # Normalize the thresholded heatmap to the 0-1 range
-        if heatmap.max() > heatmap.min():
-            heatmap_normalized = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min())
+        threshold_percentile = 95
+
+        # Ensure heatmap_raw_np is not empty and has variation before percentile
+        if heatmap_raw_np.size == 0 or heatmap_raw_np.max() == heatmap_raw_np.min():
+            threshold_value = heatmap_raw_np.min() # or some other default
         else:
-            heatmap_normalized = np.zeros_like(heatmap)
+            threshold_value = np.percentile(heatmap_raw_np, threshold_percentile)
 
-        heatmap_uint8 = np.uint8(255 * heatmap_normalized)
+        heatmap_for_overlay = np.copy(heatmap_raw_np)
+        heatmap_for_overlay[heatmap_for_overlay < threshold_value] = 0
+
+        if heatmap_for_overlay.max() > heatmap_for_overlay.min():
+            heatmap_normalized_overlay = (heatmap_for_overlay - heatmap_for_overlay.min()) / (heatmap_for_overlay.max() - heatmap_for_overlay.min())
+        else:
+            heatmap_normalized_overlay = np.zeros_like(heatmap_for_overlay)
+
+        heatmap_uint8 = np.uint8(255 * heatmap_normalized_overlay)
         
         # Resize heatmap to match the original image size
         heatmap_resized = cv2.resize(heatmap_uint8, original_image.size, interpolation=cv2.INTER_LINEAR)
@@ -566,7 +672,7 @@ class MedicalImageAnalyzer:
         
         return self._create_heatmap_overlay(heatmap, original_image)
 
-    async def analyze_image_from_upload(self, file: UploadFile) -> tuple[AnalysisResponse, Image.Image, Image.Image]:
+    async def analyze_image_from_upload(self, file: UploadFile) -> tuple[AnalysisResponse, Image.Image, Image.Image, Image.Image, Image.Image, Image.Image]:
         """
         Analyze medical image from uploaded file and return complete analysis response with images.
         
@@ -577,10 +683,13 @@ class MedicalImageAnalyzer:
             file: FastAPI UploadFile containing the medical image
             
         Returns:
-            tuple: (AnalysisResponse, original_image, heatmap_image)
-            - AnalysisResponse: Complete analysis results with findings and metadata
-            - original_image: Original PIL Image in RGB format
-            - heatmap_image: Generated heatmap overlay image
+            tuple: (AnalysisResponse, original_image, ai_attention_heatmap, new_saliency_map, probability_map, segmentation_map)
+            - AnalysisResponse: Complete analysis results
+            - original_image: Original PIL Image
+            - ai_attention_heatmap: AI Attention Heatmap (colored overlay)
+            - new_saliency_map: Grayscale Saliency Map
+            - probability_map: Grayscale Probability Map
+            - segmentation_map: Segmentation Map with contours
             
         Raises:
             HTTPException: If file processing or analysis fails
@@ -589,7 +698,7 @@ class MedicalImageAnalyzer:
         1. File validation and size checking
         2. Image preprocessing and format conversion
         3. Metadata extraction
-        4. AI-powered analysis with heatmap generation
+        4. AI-powered analysis with generation of all maps
         5. Response structuring with unique ID
         """
         try:
@@ -617,7 +726,7 @@ class MedicalImageAnalyzer:
             }
             
             # Perform AI analysis
-            raw_response, findings, heatmap_image = await self.analyze_image(image)
+            raw_response, findings, ai_attention_heatmap, new_saliency_map, probability_map, segmentation_map = await self.analyze_image(image)
             
             # Generate unique analysis ID and timestamp
             analysis_id = str(uuid.uuid4())
@@ -631,14 +740,14 @@ class MedicalImageAnalyzer:
                 image_metadata=image_metadata
             )
             
-            return analysis_response, image, heatmap_image
+            return analysis_response, image, ai_attention_heatmap, new_saliency_map, probability_map, segmentation_map
             
         except Exception as e:
             logger.error(f"Error analyzing uploaded image: {str(e)}")
             if isinstance(e, HTTPException):            raise
             raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
-    async def analyze_image_from_url(self, image_url: str) -> tuple[AnalysisResponse, Image.Image, Image.Image]:
+    async def analyze_image_from_url(self, image_url: str) -> tuple[AnalysisResponse, Image.Image, Image.Image, Image.Image, Image.Image, Image.Image]:
         """
         Analyze medical image from URL and return complete analysis response with images.
         
@@ -649,10 +758,13 @@ class MedicalImageAnalyzer:
             image_url: Valid HTTP/HTTPS URL pointing to a medical image
 
         Returns:
-            tuple: (AnalysisResponse, original_image, heatmap_image)
-            - AnalysisResponse: Complete analysis results with findings and metadata
-            - original_image: Original PIL Image in RGB format
-            - heatmap_image: Generated heatmap overlay image
+            tuple: (AnalysisResponse, original_image, ai_attention_heatmap, new_saliency_map, probability_map, segmentation_map)
+            - AnalysisResponse: Complete analysis results
+            - original_image: Original PIL Image
+            - ai_attention_heatmap: AI Attention Heatmap (colored overlay)
+            - new_saliency_map: Grayscale Saliency Map
+            - probability_map: Grayscale Probability Map
+            - segmentation_map: Segmentation Map with contours
             
         Raises:
             HTTPException: If URL fetch or analysis fails
@@ -670,7 +782,7 @@ class MedicalImageAnalyzer:
             image, image_metadata = await self.fetch_image_from_url(image_url)
             
             # Perform AI analysis
-            raw_response, findings, heatmap_image = await self.analyze_image(image)
+            raw_response, findings, ai_attention_heatmap, new_saliency_map, probability_map, segmentation_map = await self.analyze_image(image)
             
             # Generate unique analysis ID and timestamp
             analysis_id = str(uuid.uuid4())
@@ -690,7 +802,7 @@ class MedicalImageAnalyzer:
                 image_metadata=image_metadata
             )
             
-            return analysis_response, image, heatmap_image
+            return analysis_response, image, ai_attention_heatmap, new_saliency_map, probability_map, segmentation_map
             
         except Exception as e:
             logger.error(f"Error analyzing image from URL: {str(e)}")
