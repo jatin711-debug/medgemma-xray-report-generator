@@ -18,3 +18,5 @@ mysql-connector-python
 boto3
 opencv-python
 numpy
+bitsandbytes
+accelerate
