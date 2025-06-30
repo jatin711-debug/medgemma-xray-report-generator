@@ -1053,14 +1053,17 @@ async def analyze_url_and_generate_report(
         - Single AI inference run (no duplicate processing)
     """
     # Perform analysis once - this includes heatmap generation
-    analysis_response, original_image, heatmap_image = await analyzer.analyze_image_from_url(str(request.image_url))
+    analysis_response, original_image, heatmap_image, saliency_map, probability_map, segmentation_map  = await analyzer.analyze_image_from_url(str(request.image_url))
     
     # Generate PDF in thread pool to avoid blocking the event loop
     local_pdf_path = await run_in_threadpool(
         pdf_generator.generate_pdf_report, 
         analysis_response,
         original_image,
-        heatmap_image
+        heatmap_image,
+        saliency_map,
+        probability_map,
+        segmentation_map
     )
     
     # Define S3 bucket details (replace with your actual configuration)
