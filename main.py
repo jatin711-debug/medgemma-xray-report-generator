@@ -410,8 +410,8 @@ class MedicalImageAnalyzer:
                      heatmap_image = self._create_placeholder_heatmap(image)
 
 
-            new_saliency_map_image = self._generate_new_saliency_map(heatmap_raw_normalized, image.size)
-            probability_map_image = self._generate_probability_map(heatmap_raw_normalized, image.size)
+            new_saliency_map_image = self._generate_new_saliency_map(heatmap_raw_normalized, image)
+            probability_map_image = self._generate_probability_map(heatmap_raw_normalized, image)
             segmentation_map_image = self._generate_segmentation_map(heatmap_raw_normalized, image)
 
             findings = self.parse_ai_response(raw_response)
@@ -528,78 +528,85 @@ class MedicalImageAnalyzer:
             placeholder_raw_normalized = np.ones((gs,gs), dtype=np.float32) * 0.5
             return placeholder_heatmap_overlay, placeholder_raw_normalized
 
-    def _generate_new_saliency_map(self, heatmap_normalized_np: Optional[np.ndarray], target_size: tuple[int, int]) -> Image.Image:
-        """Generates a colorized saliency map from the normalized heatmap with enhanced contrast."""
+    def _generate_new_saliency_map(self, heatmap_normalized_np: Optional[np.ndarray], original_image: Image.Image) -> Image.Image:
+        """Generates a saliency map by overlaying a heatmap on a grayscale version of the original image."""
+        target_size = original_image.size
         if heatmap_normalized_np is None:
-            logger.warning("heatmap_normalized_np is None for new saliency map. Returning placeholder.")
-            return Image.new("RGB", target_size, color=(128, 128, 128)) # Gray placeholder
+            logger.warning("heatmap_normalized_np is None for new saliency map. Returning grayscale original.")
+            return original_image.convert("L").convert("RGB")
 
         try:
-            # Ensure heatmap_normalized_np is 2D
             if heatmap_normalized_np.ndim != 2:
                 logger.error(f"heatmap_normalized_np is not 2D for saliency map, shape: {heatmap_normalized_np.shape}. Returning placeholder.")
-                return Image.new("RGB", target_size, color=(128, 128, 128))
+                return original_image.convert("L").convert("RGB")
 
             # Log statistics for debugging
             logger.info(f"Saliency map input stats: min={heatmap_normalized_np.min():.4f}, max={heatmap_normalized_np.max():.4f}, mean={heatmap_normalized_np.mean():.4f}")
 
-            # Enhance contrast by applying percentile stretching
-            p_low, p_high = np.percentile(heatmap_normalized_np, [5, 95])
-            saliency_enhanced = np.clip((heatmap_normalized_np - p_low) / (p_high - p_low + 1e-8), 0, 1)
+            # Resize heatmap to match the original image size first
+            heatmap_resized = cv2.resize(heatmap_normalized_np, target_size, interpolation=cv2.INTER_LINEAR)
             
-            # Apply gamma correction for better visualization
-            saliency_enhanced = np.power(saliency_enhanced, 0.7)  # Gamma < 1 brightens mid-tones
+            # Convert to uint8 (0-255 range)
+            saliency_uint8 = np.uint8(255 * heatmap_resized)
             
-            # Convert to uint8 for color mapping
-            saliency_uint8 = np.uint8(255 * saliency_enhanced)
-            
-            # Apply color map for better visualization (using HOT colormap)
+            # Apply a colormap (HOT for saliency - black to red to yellow to white)
             saliency_colored = cv2.applyColorMap(saliency_uint8, cv2.COLORMAP_HOT)
-            saliency_colored_rgb = cv2.cvtColor(saliency_colored, cv2.COLOR_BGR2RGB)
             
-            # Convert to PIL and resize
-            saliency_pil = Image.fromarray(saliency_colored_rgb)
-            return saliency_pil.resize(target_size, Image.Resampling.LANCZOS)
+            # Convert original image to grayscale OpenCV format
+            original_gray_cv = cv2.cvtColor(np.array(original_image), cv2.COLOR_RGB2GRAY)
+            # Convert grayscale back to BGR to allow for colored overlay
+            original_bgr_from_gray = cv2.cvtColor(original_gray_cv, cv2.COLOR_GRAY2BGR)
+            
+            # Blend the colored heatmap with the grayscale version of the original image
+            # Use higher weight for the colored overlay to make it more visible
+            superimposed_img = cv2.addWeighted(saliency_colored, 0.7, original_bgr_from_gray, 0.3, 0)
+            
+            # Convert back to PIL format
+            return Image.fromarray(cv2.cvtColor(superimposed_img, cv2.COLOR_BGR2RGB))
             
         except Exception as e:
             logger.error(f"Error generating new saliency map: {e}", exc_info=True)
-            return Image.new("RGB", target_size, color=(128, 128, 128))
+            return original_image.convert("L").convert("RGB")
 
 
-    def _generate_probability_map(self, heatmap_normalized_np: Optional[np.ndarray], target_size: tuple[int, int]) -> Image.Image:
-        """Generates a colorized probability map from the normalized heatmap with enhanced contrast."""
+    def _generate_probability_map(self, heatmap_normalized_np: Optional[np.ndarray], original_image: Image.Image) -> Image.Image:
+        """Generates a probability map by overlaying a heatmap on a grayscale version of the original image."""
+        target_size = original_image.size
         if heatmap_normalized_np is None:
-            logger.warning("heatmap_normalized_np is None for probability map. Returning placeholder.")
-            return Image.new("RGB", target_size, color=(128, 128, 128))
+            logger.warning("heatmap_normalized_np is None for probability map. Returning grayscale original.")
+            return original_image.convert("L").convert("RGB")
         try:
-            # Ensure heatmap_normalized_np is 2D
             if heatmap_normalized_np.ndim != 2:
                 logger.error(f"heatmap_normalized_np is not 2D for probability map, shape: {heatmap_normalized_np.shape}. Returning placeholder.")
-                return Image.new("RGB", target_size, color=(128, 128, 128))
+                return original_image.convert("L").convert("RGB")
 
             # Log statistics for debugging
             logger.info(f"Probability map input stats: min={heatmap_normalized_np.min():.4f}, max={heatmap_normalized_np.max():.4f}, mean={heatmap_normalized_np.mean():.4f}")
 
-            # Create probability-like visualization with smooth gradients
-            prob_map = np.copy(heatmap_normalized_np)
+            # Resize heatmap to match the original image size first
+            heatmap_resized = cv2.resize(heatmap_normalized_np, target_size, interpolation=cv2.INTER_LINEAR)
             
-            # Apply sigmoid-like transformation to create more probability-like distribution
-            prob_map = 1 / (1 + np.exp(-5 * (prob_map - 0.5)))  # Sigmoid with steeper curve
+            # Convert to uint8 (0-255 range)
+            prob_uint8 = np.uint8(255 * heatmap_resized)
             
-            # Enhance contrast using histogram equalization approach
-            prob_map_uint8 = np.uint8(255 * prob_map)
+            # Apply VIRIDIS colormap for probability (dark blue to green to yellow)
+            prob_colored = cv2.applyColorMap(prob_uint8, cv2.COLORMAP_VIRIDIS)
             
-            # Apply VIRIDIS colormap for probability visualization (blue to yellow)
-            prob_colored = cv2.applyColorMap(prob_map_uint8, cv2.COLORMAP_VIRIDIS)
-            prob_colored_rgb = cv2.cvtColor(prob_colored, cv2.COLOR_BGR2RGB)
+            # Convert original image to grayscale OpenCV format
+            original_gray_cv = cv2.cvtColor(np.array(original_image), cv2.COLOR_RGB2GRAY)
+            # Convert grayscale back to BGR to allow for colored overlay
+            original_bgr_from_gray = cv2.cvtColor(original_gray_cv, cv2.COLOR_GRAY2BGR)
             
-            # Convert to PIL and resize
-            prob_pil = Image.fromarray(prob_colored_rgb)
-            return prob_pil.resize(target_size, Image.Resampling.LANCZOS)
+            # Blend the colored heatmap with the grayscale version of the original image
+            # Use higher weight for the colored overlay to make it more visible
+            superimposed_img = cv2.addWeighted(prob_colored, 0.7, original_bgr_from_gray, 0.3, 0)
+            
+            # Convert back to PIL format
+            return Image.fromarray(cv2.cvtColor(superimposed_img, cv2.COLOR_BGR2RGB))
             
         except Exception as e:
             logger.error(f"Error generating probability map: {e}", exc_info=True)
-            return Image.new("RGB", target_size, color=(128, 128, 128))
+            return original_image.convert("L").convert("RGB")
 
     def _generate_segmentation_map(self, heatmap_normalized_np: Optional[np.ndarray], original_image: Image.Image) -> Image.Image:
         """Generates a segmentation map by thresholding the normalized heatmap and drawing contours."""
