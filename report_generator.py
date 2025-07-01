@@ -712,47 +712,50 @@ class UltimatePDFGenerator:
         # === VISUAL ANALYSIS & FINDINGS ON SAME PAGE ===
         story.append(Paragraph("👁️ Visual Analysis & Diagnostic Maps", self.styles['section_header']))
         
-        # Adjust image width to fit 5 images. Total available width is approx 7.5in - margins = 6.5in
-        # Let's try 1.2 inch per image, leaving some space for padding.
-        img_max_width = 1.2 * inch
-        
-        rl_original_image = self._pil_to_reportlab_image(original_image, max_width=img_max_width)
-        rl_ai_attention_heatmap_image = self._pil_to_reportlab_image(ai_attention_heatmap_image, max_width=img_max_width)
-        rl_new_saliency_map_image = self._pil_to_reportlab_image(new_saliency_map_image, max_width=img_max_width)
-        rl_probability_map_image = self._pil_to_reportlab_image(probability_map_image, max_width=img_max_width)
-        rl_segmentation_map_image = self._pil_to_reportlab_image(segmentation_map_image, max_width=img_max_width)
+        # Define a common image width for two images per page
+        # Page width is letter (8.5 inch), margins are 40pts each (approx 0.55 inch)
+        # Available width = 8.5 - 2*0.55 = 8.5 - 1.1 = 7.4 inches
+        # For two images, allow some space in between. Let's use 3 inches per image.
+        img_max_width_pair = 3 * inch
 
-        image_table_data = [
-            [
-                rl_original_image,
-                rl_ai_attention_heatmap_image,
-                rl_new_saliency_map_image,
-                rl_probability_map_image,
-                rl_segmentation_map_image
-            ],
-            [
-                Paragraph("Original X-Ray", self.styles['caption']),
-                Paragraph("AI Attention Heatmap", self.styles['caption']),
-                Paragraph("Saliency Map (Grayscale)", self.styles['caption']),
-                Paragraph("Probability Map", self.styles['caption']),
-                Paragraph("Segmentation Map", self.styles['caption'])
-            ]
+        # Convert all images once
+        rl_original_image_large = self._pil_to_reportlab_image(original_image, max_width=img_max_width_pair)
+        rl_ai_attention_heatmap_image_large = self._pil_to_reportlab_image(ai_attention_heatmap_image, max_width=img_max_width_pair)
+        rl_new_saliency_map_image_large = self._pil_to_reportlab_image(new_saliency_map_image, max_width=img_max_width_pair)
+        rl_probability_map_image_large = self._pil_to_reportlab_image(probability_map_image, max_width=img_max_width_pair)
+        rl_segmentation_map_image_large = self._pil_to_reportlab_image(segmentation_map_image, max_width=img_max_width_pair)
+
+        maps_data = [
+            ("AI Attention Heatmap", rl_ai_attention_heatmap_image_large),
+            ("Saliency Map (Grayscale)", rl_new_saliency_map_image_large),
+            ("Probability Map", rl_probability_map_image_large),
+            ("Segmentation Map", rl_segmentation_map_image_large)
         ]
-        
-        # Total width for 5 images, each 1.2 inch, plus small gaps.
-        # (1.2 * 5) = 6.0 inch. Let's give a bit more for column spacing.
-        col_width_val = 1.25 * inch # A little more space for each image and its internal padding
-        image_table = Table(image_table_data, colWidths=[col_width_val] * 5)
-        image_table.setStyle(TableStyle([
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LEFTPADDING', (0,0), (-1,-1), 2), # Small padding between images
-            ('RIGHTPADDING', (0,0), (-1,-1), 2),# Small padding between images
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 10), # Padding below images before caption
-        ]))
-        
-        story.append(KeepTogether(image_table)) # Keep images and captions together
-        story.append(Spacer(1, 25))
+
+        for map_title, rl_map_image in maps_data:
+            story.append(PageBreak())
+            story.append(Paragraph(f"Visual Analysis: {map_title}", self.styles['section_header']))
+            story.append(Spacer(1, 15))
+
+            image_pair_data = [
+                [rl_original_image_large, rl_map_image],
+                [Paragraph("Original X-Ray", self.styles['caption']), Paragraph(map_title, self.styles['caption'])]
+            ]
+
+            # Column widths for two images, allowing for some spacing
+            col_widths = [img_max_width_pair + 0.2*inch, img_max_width_pair + 0.2*inch] # Add a bit for padding within the cell
+
+            image_pair_table = Table(image_pair_data, colWidths=col_widths)
+            image_pair_table.setStyle(TableStyle([
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0,0), (-1,-1), 5),
+                ('RIGHTPADDING', (0,0), (-1,-1), 5),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 10), # Padding below images before caption
+            ]))
+
+            story.append(KeepTogether(image_pair_table))
+            story.append(Spacer(1, 25))
 
         # === DETAILED FINDINGS SECTION ===
         story.append(Paragraph("🔬 Detailed Technical Findings", self.styles['section_header']))
