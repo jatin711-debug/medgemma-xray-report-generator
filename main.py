@@ -468,7 +468,6 @@ class MedicalImageAnalyzer:
             # Ensure num_text_tokens is calculated correctly based on actual sequence length from model
             # The image patches might not always be 'num_image_patches' if seq_len is smaller
             # This happens if the text part of the input is very short.
-            # The image patch tokens are generally at the end.
             # Let's assume the image part is `num_image_patches` and text is `seq_len - num_image_patches`
             # However, the actual number of image tokens in attention_map_tensor might be related to `grid_size*grid_size`
             # The critical part is `text_to_image_attention = attention_map_tensor[:-num_image_patches, -num_image_patches:]`
@@ -530,42 +529,77 @@ class MedicalImageAnalyzer:
             return placeholder_heatmap_overlay, placeholder_raw_normalized
 
     def _generate_new_saliency_map(self, heatmap_normalized_np: Optional[np.ndarray], target_size: tuple[int, int]) -> Image.Image:
-        """Generates a grayscale saliency map from the normalized heatmap."""
+        """Generates a colorized saliency map from the normalized heatmap with enhanced contrast."""
         if heatmap_normalized_np is None:
             logger.warning("heatmap_normalized_np is None for new saliency map. Returning placeholder.")
-            return Image.new("L", target_size, color=128) # Gray placeholder
+            return Image.new("RGB", target_size, color=(128, 128, 128)) # Gray placeholder
 
         try:
             # Ensure heatmap_normalized_np is 2D
             if heatmap_normalized_np.ndim != 2:
                 logger.error(f"heatmap_normalized_np is not 2D for saliency map, shape: {heatmap_normalized_np.shape}. Returning placeholder.")
-                return Image.new("L", target_size, color=128)
+                return Image.new("RGB", target_size, color=(128, 128, 128))
 
-            saliency_map_uint8 = np.uint8(255 * heatmap_normalized_np)
-            saliency_pil = Image.fromarray(saliency_map_uint8, mode='L')
+            # Log statistics for debugging
+            logger.info(f"Saliency map input stats: min={heatmap_normalized_np.min():.4f}, max={heatmap_normalized_np.max():.4f}, mean={heatmap_normalized_np.mean():.4f}")
+
+            # Enhance contrast by applying percentile stretching
+            p_low, p_high = np.percentile(heatmap_normalized_np, [5, 95])
+            saliency_enhanced = np.clip((heatmap_normalized_np - p_low) / (p_high - p_low + 1e-8), 0, 1)
+            
+            # Apply gamma correction for better visualization
+            saliency_enhanced = np.power(saliency_enhanced, 0.7)  # Gamma < 1 brightens mid-tones
+            
+            # Convert to uint8 for color mapping
+            saliency_uint8 = np.uint8(255 * saliency_enhanced)
+            
+            # Apply color map for better visualization (using HOT colormap)
+            saliency_colored = cv2.applyColorMap(saliency_uint8, cv2.COLORMAP_HOT)
+            saliency_colored_rgb = cv2.cvtColor(saliency_colored, cv2.COLOR_BGR2RGB)
+            
+            # Convert to PIL and resize
+            saliency_pil = Image.fromarray(saliency_colored_rgb)
             return saliency_pil.resize(target_size, Image.Resampling.LANCZOS)
+            
         except Exception as e:
             logger.error(f"Error generating new saliency map: {e}", exc_info=True)
-            return Image.new("L", target_size, color=128)
+            return Image.new("RGB", target_size, color=(128, 128, 128))
 
 
     def _generate_probability_map(self, heatmap_normalized_np: Optional[np.ndarray], target_size: tuple[int, int]) -> Image.Image:
-        """Generates a grayscale probability map from the normalized heatmap."""
+        """Generates a colorized probability map from the normalized heatmap with enhanced contrast."""
         if heatmap_normalized_np is None:
             logger.warning("heatmap_normalized_np is None for probability map. Returning placeholder.")
-            return Image.new("L", target_size, color=128)
+            return Image.new("RGB", target_size, color=(128, 128, 128))
         try:
             # Ensure heatmap_normalized_np is 2D
             if heatmap_normalized_np.ndim != 2:
                 logger.error(f"heatmap_normalized_np is not 2D for probability map, shape: {heatmap_normalized_np.shape}. Returning placeholder.")
-                return Image.new("L", target_size, color=128)
+                return Image.new("RGB", target_size, color=(128, 128, 128))
 
-            prob_map_uint8 = np.uint8(255 * heatmap_normalized_np)
-            prob_pil = Image.fromarray(prob_map_uint8, mode='L')
+            # Log statistics for debugging
+            logger.info(f"Probability map input stats: min={heatmap_normalized_np.min():.4f}, max={heatmap_normalized_np.max():.4f}, mean={heatmap_normalized_np.mean():.4f}")
+
+            # Create probability-like visualization with smooth gradients
+            prob_map = np.copy(heatmap_normalized_np)
+            
+            # Apply sigmoid-like transformation to create more probability-like distribution
+            prob_map = 1 / (1 + np.exp(-5 * (prob_map - 0.5)))  # Sigmoid with steeper curve
+            
+            # Enhance contrast using histogram equalization approach
+            prob_map_uint8 = np.uint8(255 * prob_map)
+            
+            # Apply VIRIDIS colormap for probability visualization (blue to yellow)
+            prob_colored = cv2.applyColorMap(prob_map_uint8, cv2.COLORMAP_VIRIDIS)
+            prob_colored_rgb = cv2.cvtColor(prob_colored, cv2.COLOR_BGR2RGB)
+            
+            # Convert to PIL and resize
+            prob_pil = Image.fromarray(prob_colored_rgb)
             return prob_pil.resize(target_size, Image.Resampling.LANCZOS)
+            
         except Exception as e:
             logger.error(f"Error generating probability map: {e}", exc_info=True)
-            return Image.new("L", target_size, color=128)
+            return Image.new("RGB", target_size, color=(128, 128, 128))
 
     def _generate_segmentation_map(self, heatmap_normalized_np: Optional[np.ndarray], original_image: Image.Image) -> Image.Image:
         """Generates a segmentation map by thresholding the normalized heatmap and drawing contours."""
