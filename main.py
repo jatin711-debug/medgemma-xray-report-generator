@@ -543,34 +543,29 @@ class MedicalImageAnalyzer:
             # Log statistics for debugging
             logger.info(f"Saliency map input stats: min={heatmap_normalized_np.min():.4f}, max={heatmap_normalized_np.max():.4f}, mean={heatmap_normalized_np.mean():.4f}")
 
-            # Resize heatmap to match the original image size first
+            # Resize heatmap to match the original image size
             heatmap_resized = cv2.resize(heatmap_normalized_np, target_size, interpolation=cv2.INTER_LINEAR)
             
-            # Convert to uint8 (0-255 range)
-            saliency_uint8 = np.uint8(255 * heatmap_resized)
+            # Convert original image to grayscale
+            original_gray = original_image.convert("L")
+            original_gray_np = np.array(original_gray)
             
-            # Apply a colormap (HOT for saliency - black to red to yellow to white)
-            saliency_colored = cv2.applyColorMap(saliency_uint8, cv2.COLORMAP_HOT)
+            # Create saliency map by multiplying grayscale image with attention weights
+            # This highlights important regions while preserving image structure
+            saliency_map = original_gray_np.astype(np.float32) * heatmap_resized
             
-            # Convert original image to grayscale OpenCV format
-            original_gray_cv = cv2.cvtColor(np.array(original_image), cv2.COLOR_RGB2GRAY)
-            # Convert grayscale back to BGR to allow for colored overlay
-            original_bgr_from_gray = cv2.cvtColor(original_gray_cv, cv2.COLOR_GRAY2BGR)
+            # Normalize to 0-255 range
+            saliency_map = np.clip(saliency_map, 0, 255).astype(np.uint8)
             
-            # Blend the colored heatmap with the grayscale version of the original image
-            # Use higher weight for the colored overlay to make it more visible
-            superimposed_img = cv2.addWeighted(saliency_colored, 0.7, original_bgr_from_gray, 0.3, 0)
-            
-            # Convert back to PIL format
-            return Image.fromarray(cv2.cvtColor(superimposed_img, cv2.COLOR_BGR2RGB))
+            # Convert back to RGB PIL Image
+            return Image.fromarray(saliency_map).convert("RGB")
             
         except Exception as e:
             logger.error(f"Error generating new saliency map: {e}", exc_info=True)
             return original_image.convert("L").convert("RGB")
 
-
     def _generate_probability_map(self, heatmap_normalized_np: Optional[np.ndarray], original_image: Image.Image) -> Image.Image:
-        """Generates a probability map by overlaying a heatmap on a grayscale version of the original image."""
+        """Generates a probability map showing attention weights as intensity values."""
         target_size = original_image.size
         if heatmap_normalized_np is None:
             logger.warning("heatmap_normalized_np is None for probability map. Returning grayscale original.")
@@ -583,26 +578,14 @@ class MedicalImageAnalyzer:
             # Log statistics for debugging
             logger.info(f"Probability map input stats: min={heatmap_normalized_np.min():.4f}, max={heatmap_normalized_np.max():.4f}, mean={heatmap_normalized_np.mean():.4f}")
 
-            # Resize heatmap to match the original image size first
+            # Resize heatmap to match the original image size
             heatmap_resized = cv2.resize(heatmap_normalized_np, target_size, interpolation=cv2.INTER_LINEAR)
             
-            # Convert to uint8 (0-255 range)
-            prob_uint8 = np.uint8(255 * heatmap_resized)
+            # Convert to uint8 (0-255 range) - this represents probability/attention strength
+            prob_map = np.uint8(255 * heatmap_resized)
             
-            # Apply VIRIDIS colormap for probability (dark blue to green to yellow)
-            prob_colored = cv2.applyColorMap(prob_uint8, cv2.COLORMAP_VIRIDIS)
-            
-            # Convert original image to grayscale OpenCV format
-            original_gray_cv = cv2.cvtColor(np.array(original_image), cv2.COLOR_RGB2GRAY)
-            # Convert grayscale back to BGR to allow for colored overlay
-            original_bgr_from_gray = cv2.cvtColor(original_gray_cv, cv2.COLOR_GRAY2BGR)
-            
-            # Blend the colored heatmap with the grayscale version of the original image
-            # Use higher weight for the colored overlay to make it more visible
-            superimposed_img = cv2.addWeighted(prob_colored, 0.7, original_bgr_from_gray, 0.3, 0)
-            
-            # Convert back to PIL format
-            return Image.fromarray(cv2.cvtColor(superimposed_img, cv2.COLOR_BGR2RGB))
+            # Convert to RGB PIL Image (grayscale probability map)
+            return Image.fromarray(prob_map).convert("RGB")
             
         except Exception as e:
             logger.error(f"Error generating probability map: {e}", exc_info=True)
