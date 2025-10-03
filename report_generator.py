@@ -602,11 +602,8 @@ class UltimatePDFGenerator:
     def generate_pdf_report(self,
                             analysis_response,
                             original_image: Image.Image,
-                            ai_attention_heatmap_image: Image.Image,
-                            new_saliency_map_image: Image.Image,
-                            probability_map_image: Image.Image,
-                            segmentation_map_image: Image.Image) -> str:
-        """Generate the most beautiful medical PDF report ever created, now with more maps!"""
+                            ai_attention_heatmap_image: Image.Image) -> str:
+        """Generate a streamlined medical PDF report with only the essential heatmap."""
         
         filename = f"premium_medical_report_{analysis_response.analysis_id}.pdf"
         filepath = os.path.join(self.reports_dir, filename)
@@ -623,33 +620,33 @@ class UltimatePDFGenerator:
         
         # === COVER PAGE ===
         story.append(Spacer(1, 25))
-        story.append(Paragraph("PNEUMOTHORAX", self.styles['hero_title']))
-        story.append(Paragraph("DIAGNOSTIC ANALYSIS REPORT", self.styles['main_title']))
+        story.append(Paragraph("Multi-Condition Chest X-Ray Analysis", self.styles['hero_title']))
+        story.append(Paragraph("AI-Powered Diagnostic Report", self.styles['main_title']))
         story.append(Spacer(1, 12))
         
         story.append(Paragraph(
-            "Advanced AI-Powered Medical Imaging Analysis with Confidence Assessment and Clinical Decision Support",
+            "Analysis for Pneumothorax, Pneumonia, and TB with AI-Generated Heatmap",
             self.styles['subtitle']
         ))
         
         story.append(Spacer(1, 35))
         
-        impression_icon = "🚨" if "DETECTED" in findings.impression.upper() else "📊"
+        impression_icon = "🚨" if "positive" in findings.impression.lower() else "✅"
         confidence_icon = "🎯"
         
-        impression_color = 'danger' if 'DETECTED' in findings.impression.upper() else 'success'
-        confidence_color = 'success' if 'HIGH' in findings.confidence_level.upper() else 'warning'
+        impression_color = 'danger' if "positive" in findings.impression.lower() else 'success'
+        confidence_color = 'primary' # Keep confidence color neutral
         
         stat_cards = [
             self._create_premium_stat_card(
                 findings.impression.title().replace('_', ' '), 
-                "Clinical Impression", 
+                "Overall Impression",
                 impression_color, 
                 impression_icon
             ),
             self._create_premium_stat_card(
-                findings.confidence_level.title(), 
-                "AI Confidence Level", 
+                findings.confidence_level,
+                "Highest Confidence",
                 confidence_color, 
                 confidence_icon
             )
@@ -669,7 +666,7 @@ class UltimatePDFGenerator:
         story.append(Spacer(1, 35))
         
         story.append(Paragraph("🧠 AI Analysis Output", self.styles['section_header']))
-        analysis_text = analysis_response.raw_response.replace('\n\n', '<br/><br/>').replace('\n', ' ')
+        analysis_text = analysis_response.raw_response.replace('\n\n', '<br/><br/>').replace('\n', '<br/>')
         
         analysis_table = Table([[Paragraph(analysis_text, self.styles['body'])]], colWidths=[6.5*inch])
         analysis_table.setStyle(TableStyle([
@@ -680,113 +677,68 @@ class UltimatePDFGenerator:
         ]))
         
         story.append(analysis_table)
-        story.append(Spacer(1, 35))
+        story.append(PageBreak())
         
-        story.append(Paragraph("⚖️ Medical & Legal Disclaimer", self.styles['section_header']))
-        disclaimer_content = """
-        <b>🏥 CRITICAL CLINICAL NOTICE:</b> This report contains AI-generated diagnostic analysis for <b>informational and educational purposes only</b>. 
-        This analysis is <b>NOT a substitute for professional medical diagnosis, treatment, or clinical advice</b> from qualified healthcare professionals.
-        <br/><br/>
-        <b>⚠️ CLINICAL LIMITATIONS:</b> Artificial intelligence models may produce false positives, false negatives, or miss critical pathological findings. 
-        All diagnostic decisions must be made by licensed medical professionals following thorough clinical correlation, comprehensive patient history review, 
-        and appropriate additional diagnostic testing.
-        <br/><br/>
-        <b>📋 REGULATORY COMPLIANCE:</b> This AI diagnostic tool is not FDA-approved for primary clinical diagnosis. Use only as a supplementary 
-        clinical decision support aid in conjunction with professional medical evaluation and standard diagnostic protocols.
-        <br/><br/>
-        <b>🔒 CONFIDENTIALITY:</b> This report contains confidential medical information protected under HIPAA regulations. 
-        Unauthorized disclosure is strictly prohibited.
-        """
+        # === VISUAL ANALYSIS (HEATMAP ONLY) ===
+        story.append(Paragraph("👁️ Visual Analysis: AI Attention Heatmap", self.styles['section_header']))
+        story.append(Spacer(1, 15))
         
-        disclaimer_table = Table([[Paragraph(disclaimer_content, self.styles['disclaimer'])]], colWidths=[6.5*inch])
-        disclaimer_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), self.colors['warning_ultra_light']),
-            ('BOX', (0, 0), (-1, -1), 1, self.colors['warning']),
-            ('PADDING', (0, 0), (-1, -1), 16),
-            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
-        ]))
-        
-        story.append(disclaimer_table)
-        story.append(Spacer(1, 25))
-        
-        # === VISUAL ANALYSIS & FINDINGS ON SAME PAGE ===
-        story.append(Paragraph("👁️ Visual Analysis & Diagnostic Maps", self.styles['section_header']))
-        
-        # Define a common image width for two images per page
-        # Page width is letter (8.5 inch), margins are 40pts each (approx 0.55 inch)
-        # Available width = 8.5 - 2*0.55 = 8.5 - 1.1 = 7.4 inches
-        # For two images, allow some space in between. Let's use 3 inches per image.
         img_max_width_pair = 3 * inch
+        rl_original_image = self._pil_to_reportlab_image(original_image, max_width=img_max_width_pair)
+        rl_heatmap_image = self._pil_to_reportlab_image(ai_attention_heatmap_image, max_width=img_max_width_pair)
 
-        # Convert all images once
-        rl_original_image_large = self._pil_to_reportlab_image(original_image, max_width=img_max_width_pair)
-        rl_ai_attention_heatmap_image_large = self._pil_to_reportlab_image(ai_attention_heatmap_image, max_width=img_max_width_pair)
-        rl_new_saliency_map_image_large = self._pil_to_reportlab_image(new_saliency_map_image, max_width=img_max_width_pair)
-        rl_probability_map_image_large = self._pil_to_reportlab_image(probability_map_image, max_width=img_max_width_pair)
-        rl_segmentation_map_image_large = self._pil_to_reportlab_image(segmentation_map_image, max_width=img_max_width_pair)
-
-        maps_data = [
-            ("AI Attention Heatmap", rl_ai_attention_heatmap_image_large),
-            ("Saliency Map (Grayscale)", rl_new_saliency_map_image_large),
-            ("Probability Map", rl_probability_map_image_large),
-            ("Segmentation Map", rl_segmentation_map_image_large)
+        image_pair_data = [
+            [rl_original_image, rl_heatmap_image],
+            [Paragraph("Original X-Ray", self.styles['caption']), Paragraph("AI Attention Heatmap", self.styles['caption'])]
         ]
 
-        for map_title, rl_map_image in maps_data:
-            story.append(PageBreak())
-            story.append(Paragraph(f"Visual Analysis: {map_title}", self.styles['section_header']))
-            story.append(Spacer(1, 15))
+        col_widths = [img_max_width_pair + 0.2*inch, img_max_width_pair + 0.2*inch]
+        image_pair_table = Table(image_pair_data, colWidths=col_widths)
+        image_pair_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('LEFTPADDING', (0,0), (-1,-1), 5),
+            ('RIGHTPADDING', (0,0), (-1,-1), 5),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
+        ]))
 
-            image_pair_data = [
-                [rl_original_image_large, rl_map_image],
-                [Paragraph("Original X-Ray", self.styles['caption']), Paragraph(map_title, self.styles['caption'])]
-            ]
-
-            # Column widths for two images, allowing for some spacing
-            col_widths = [img_max_width_pair + 0.2*inch, img_max_width_pair + 0.2*inch] # Add a bit for padding within the cell
-
-            image_pair_table = Table(image_pair_data, colWidths=col_widths)
-            image_pair_table.setStyle(TableStyle([
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('LEFTPADDING', (0,0), (-1,-1), 5),
-                ('RIGHTPADDING', (0,0), (-1,-1), 5),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 10), # Padding below images before caption
-            ]))
-
-            story.append(KeepTogether(image_pair_table))
-            story.append(Spacer(1, 25))
+        story.append(KeepTogether(image_pair_table))
+        story.append(Spacer(1, 25))
 
         # === DETAILED FINDINGS SECTION ===
         story.append(Paragraph("🔬 Detailed Technical Findings", self.styles['section_header']))
         
+        # Regex to parse the abnormalities
+        abnormality_pattern = re.compile(r"(\w+)\s+\(([\d.]+%)\)")
+
+        # Initialize with header
         detailed_findings_data = [
-            [Paragraph("<b>Medical Finding</b>", self.styles['table_header']), 
-             Paragraph("<b>Detection Status</b>", self.styles['table_header']), 
-             Paragraph("<b>AI-Generated Clinical Details</b>", self.styles['table_header'])]
+            [Paragraph("<b>Medical Condition</b>", self.styles['table_header']),
+             Paragraph("<b>Detection Status</b>", self.styles['table_header']),
+             Paragraph("<b>Confidence</b>", self.styles['table_header'])]
         ]
-        
-        is_detected = "detected" in findings.impression.lower() and "not detected" not in findings.impression.lower()
 
-        if is_detected:
-            # Keep the full finding name as it comes from the AI
-            finding_name = findings.impression.replace("_", " ").replace("\n", " ").strip().title()
-            status_content = f'<font color="{self.colors["danger"].hexval()}"><b>DETECTED</b></font>'
+        # All conditions to be listed
+        all_conditions = ["Pneumothorax", "Pneumonia", "TB"]
+        detected_conditions = {match.group(1): match.group(2) for match in abnormality_pattern.finditer(" ".join(findings.abnormalities))}
+
+        for condition in all_conditions:
+            if condition in detected_conditions:
+                status_content = f'<font color="{self.colors["danger"].hexval()}"><b>Detected</b></font>'
+                confidence = detected_conditions[condition]
+            else:
+                status_content = f'<font color="{self.colors["success_dark"].hexval()}">Not Detected</font>'
+                confidence = "N/A"
+
             status_p = Paragraph(status_content, self.styles['finding_status'])
-            details_text = "<br/>".join([f"• {detail}" for detail in findings.abnormalities])
-        else:
-            finding_name = findings.impression.replace("_", " ").replace("\n", " ").strip().title()
-            status_content = f'<font color="{self.colors["success_dark"].hexval()}"><b>NOT DETECTED</b></font>'
-            status_p = Paragraph(status_content, self.styles['finding_status'])
-            details_text = f"• {findings.abnormalities[0]}" if findings.abnormalities else "• No abnormalities detected in the chest X-ray analysis."
+            condition_p = Paragraph(condition, self.styles['body'])
+            confidence_p = Paragraph(confidence, self.styles['body'])
 
-        finding_p = Paragraph(finding_name, self.styles['body'])
-        details_p = Paragraph(details_text, self.styles['body'])
-        detailed_findings_data.append([finding_p, status_p, details_p])
+            detailed_findings_data.append([condition_p, status_p, confidence_p])
 
-        findings_table = Table(detailed_findings_data, colWidths=[1.4*inch, 1.3*inch, 3.8*inch])
+        findings_table = Table(detailed_findings_data, colWidths=[2.5*inch, 2*inch, 2*inch])
         findings_table.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('GRID', (0, 0), (-1, -1), 0.5, self.colors['gray_300']),
             ('BACKGROUND', (0, 0), (-1, 0), self.colors['primary_ultra_light']),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
@@ -794,6 +746,7 @@ class UltimatePDFGenerator:
             ('LEFTPADDING', (0, 0), (-1, -1), 12),
             ('RIGHTPADDING', (0, 0), (-1, -1), 12),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [self.colors['white'], self.colors['gray_50']]),
+            ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
         ]))
         
         story.append(findings_table)

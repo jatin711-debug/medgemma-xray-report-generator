@@ -256,40 +256,64 @@ class MedicalImageAnalyzer:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
     
-    def parse_ai_response(self, raw_response: str) -> RadiologyFindings:
+    def parse_ai_response_multi(self, raw_response: str) -> RadiologyFindings:
         """
-        Parse raw AI model output for pneumothorax detection.
-        
-        This method intelligently extracts the finding and confidence level for pneumothorax.
+        Parse a structured AI model response for multiple conditions.
+        Fixes the bug where "no pneumothorax detected" was misinterpreted.
         
         Args:
-            raw_response: Raw text output from the Med-GEMMA-3 model
-              Returns:
-            RadiologyFindings: Structured medical findings for pneumothorax.
+            raw_response: Raw text output from the Med-GEMMA model.
+
+        Returns:
+            RadiologyFindings: Structured medical findings for all analyzed conditions.
         """
         try:
-            # Use regex to find confidence percentage
-            confidence_match = re.search(r'(\d+\.?\d*)\s?%', raw_response)
-            confidence = f"{confidence_match.group(1)}%" if confidence_match else "N/A"
+            findings = {}
+            # Regex to capture each condition block
+            pattern = re.compile(r"\*\*Finding: (Pneumothorax|Pneumonia|TB)\*\*\n- \*\*Status\*\*: (Detected|Not Detected)\n- \*\*Confidence\*\*: ([\d.]+%|N/A)", re.IGNORECASE)
+            matches = pattern.findall(raw_response)
 
-            # Determine finding based on model output
-            if "no pneumothorax detected" in raw_response.lower():
-                finding = "No Pneumothorax Detected"
-                abnormalities = ["No evidence of pneumothorax found."]
+            for match in matches:
+                condition, status, confidence = match
+                findings[condition.strip()] = {
+                    "status": status.strip(),
+                    "confidence": confidence.strip()
+                }
+
+            if not findings:
+                # Fallback for unstructured responses
+                logger.warning("Could not parse structured response, using fallback.")
+                return RadiologyFindings(
+                    anatomical_structures=["Chest structures"],
+                    abnormalities=["Could not parse AI response."],
+                    impression="Inconclusive",
+                    recommendations=["Manual review required."],
+                    confidence_level="N/A"
+                )
+
+            detected_conditions = [f"{cond} ({f['confidence']})" for cond, f in findings.items() if f['status'].lower() == 'detected']
+
+            if detected_conditions:
+                impression = "Positive for " + ", ".join(c.split(' ')[0] for c in detected_conditions)
+                abnormalities = detected_conditions
             else:
-                finding = "Pneumothorax Detected"
-                abnormalities = ["Evidence of pneumothorax found."]
+                impression = "Negative for all tested conditions"
+                abnormalities = ["No evidence of Pneumothorax, Pneumonia, or TB found."]
+
+            # Use the highest confidence among detected conditions, or "N/A"
+            confidences = [float(f['confidence'].replace('%', '')) for f in findings.values() if '%' in f['confidence']]
+            overall_confidence = f"{max(confidences):.1f}%" if confidences else "N/A"
 
             return RadiologyFindings(
-                anatomical_structures=["Chest structures analyzed for pneumothorax."],
+                anatomical_structures=["Lungs", "Pleura", "Mediastinum"],
                 abnormalities=abnormalities,
-                impression=finding,
+                impression=impression,
                 recommendations=["Clinical correlation and expert review is recommended."],
-                confidence_level=confidence
+                confidence_level=overall_confidence
             )
-            
+
         except Exception as e:
-            logger.error(f"Error parsing AI response: {str(e)}")
+            logger.error(f"Error parsing multi-condition AI response: {str(e)}")
             return RadiologyFindings(
                 anatomical_structures=["Analysis completed"],
                 abnormalities=["Unable to parse detailed findings"],
@@ -297,12 +321,11 @@ class MedicalImageAnalyzer:
                 recommendations=["Manual review recommended"],
                 confidence_level="Not available"
             )
-    
-    async def analyze_image(self, image: Image.Image) -> tuple[str, RadiologyFindings, Image.Image, Image.Image, Image.Image, Image.Image]:
+
+    async def analyze_image(self, image: Image.Image) -> tuple[str, RadiologyFindings, Image.Image]:
         """
         Perform AI-powered medical image analysis using Med-GEMMA.
-        Returns raw text response, structured findings, AI Attention Heatmap,
-        New Saliency Map, Probability Map, and Segmentation Map.
+        Returns raw text response, structured findings, and AI Attention Heatmap.
         """
         await self.load_model()
 
@@ -313,7 +336,7 @@ class MedicalImageAnalyzer:
             messages = [
                 {
                     "role": "system",
-                    "content": [{"type": "text", "text": "You are a highly experienced radiologist. You analyze chest X-rays for critical findings, especially pneumothorax."}]
+                    "content": [{"type": "text", "text": "You are a highly experienced radiologist. Analyze chest X-rays for Pneumothorax, Pneumonia, and TB."}]
                 },
                 {
                     "role": "user",
@@ -321,13 +344,18 @@ class MedicalImageAnalyzer:
                         {
                             "type": "text",
                             "text": (
-                                "Review this chest X-ray carefully for signs of pneumothorax, including loss of lung markings, "
-                                "pleural line visibility, and increased radiolucency.\n\n"
-                                "Respond strictly in the following format:\n\n"
-                                "**Finding**: [Pneumothorax detected | No pneumothorax detected]\n"
-                                "**Confidence**: [XX%]\n"
-                                "**Brief Reasoning**: [One-sentence justification using clinical language]\n\n"
-                                "Keep the response within 2 lines total. Do not include any disclaimers or extra comments."
+                                "Review this chest X-ray for signs of Pneumothorax, Pneumonia, and Tuberculosis (TB).\n"
+                                "Respond strictly in the following format for EACH condition:\n\n"
+                                "**Finding: Pneumothorax**\n"
+                                "- **Status**: [Detected | Not Detected]\n"
+                                "- **Confidence**: [XX%]\n\n"
+                                "**Finding: Pneumonia**\n"
+                                "- **Status**: [Detected | Not Detected]\n"
+                                "- **Confidence**: [XX%]\n\n"
+                                "**Finding: TB**\n"
+                                "- **Status**: [Detected | Not Detected]\n"
+                                "- **Confidence**: [XX%]\n\n"
+                                "Do not include any reasoning, disclaimers, or extra comments. Provide only the structured findings."
                             )
                         },
                         {"type": "image", "image": image_for_model}
@@ -396,30 +424,15 @@ class MedicalImageAnalyzer:
             else:
                 logger.warning("⚠️  Still no attentions found - will create placeholder maps")
 
-            # Generate various maps
-            # heatmap_raw_normalized is the key intermediate map (normalized attention)
-            heatmap_image, heatmap_raw_normalized = self._generate_heatmap_and_raw_normalized(attentions, image)
+            # Generate heatmap
+            heatmap_image, _ = self._generate_heatmap_and_raw_normalized(attentions, image)
 
-            if heatmap_raw_normalized is None: # Handle case where attention extraction failed
-                logger.warning("heatmap_raw_normalized is None. Generating placeholder for all maps.")
-                # Create a default small gray square as placeholder for heatmap_raw_normalized
-                # The size (e.g., 14x14) should ideally match what would have been the grid_size.
-                # Using a common fallback like 14x14.
-                heatmap_raw_normalized = np.ones((14, 14), dtype=np.float32) * 0.5
-                if heatmap_image is None: # If _generate_heatmap_and_raw_normalized also returned None for image
-                     heatmap_image = self._create_placeholder_heatmap(image)
-
-
-            new_saliency_map_image = self._generate_new_saliency_map(heatmap_raw_normalized, image)
-            probability_map_image = self._generate_probability_map(heatmap_raw_normalized, image)
-            segmentation_map_image = self._generate_segmentation_map(heatmap_raw_normalized, image)
-
-            findings = self.parse_ai_response(raw_response)
-            return raw_response, findings, heatmap_image, new_saliency_map_image, probability_map_image, segmentation_map_image
+            findings = self.parse_ai_response_multi(raw_response)
+            return raw_response, findings, heatmap_image
 
         except Exception as e:
             logger.error(f"Error during image analysis: {str(e)}", exc_info=True)
-            # Return placeholders if analysis fails critically before map generation
+            # Return placeholders if analysis fails critically
             placeholder_img = self._create_placeholder_heatmap(image)
             findings = RadiologyFindings(
                 anatomical_structures=["Error during analysis"],
@@ -428,8 +441,7 @@ class MedicalImageAnalyzer:
                 recommendations=["Review error logs"],
                 confidence_level="N/A"
             )
-            # Ensure 6 items are returned by analyze_image in all paths
-            return f"Error: {str(e)}", findings, placeholder_img, placeholder_img, placeholder_img, placeholder_img
+            return f"Error: {str(e)}", findings, placeholder_img
 
 
     def _generate_heatmap_and_raw_normalized(self, attentions: Optional[tuple], original_image: Image.Image) -> tuple[Image.Image, Optional[np.ndarray]]:
@@ -926,9 +938,9 @@ class MedicalImageAnalyzer:
                  return Image.new('RGB', original_image.size, color='darkgray')
 
 
-    async def analyze_image_from_upload(self, file: UploadFile) -> tuple[AnalysisResponse, Image.Image, Image.Image, Image.Image, Image.Image, Image.Image]:
+    async def analyze_image_from_upload(self, file: UploadFile) -> tuple[AnalysisResponse, Image.Image, Image.Image]:
         """
-        Analyze medical image from uploaded file and return complete analysis response with images.
+        Analyze medical image from uploaded file and return analysis response with heatmap.
         
         Processes uploaded image files through the complete analysis pipeline,
         including validation, preprocessing, AI analysis, and metadata collection.
@@ -937,23 +949,13 @@ class MedicalImageAnalyzer:
             file: FastAPI UploadFile containing the medical image
             
         Returns:
-            tuple: (AnalysisResponse, original_image, ai_attention_heatmap, new_saliency_map, probability_map, segmentation_map)
+            tuple: (AnalysisResponse, original_image, ai_attention_heatmap)
             - AnalysisResponse: Complete analysis results
             - original_image: Original PIL Image
             - ai_attention_heatmap: AI Attention Heatmap (colored overlay)
-            - new_saliency_map: Grayscale Saliency Map
-            - probability_map: Grayscale Probability Map
-            - segmentation_map: Segmentation Map with contours
             
         Raises:
             HTTPException: If file processing or analysis fails
-            
-        Process:
-        1. File validation and size checking
-        2. Image preprocessing and format conversion
-        3. Metadata extraction
-        4. AI-powered analysis with generation of all maps
-        5. Response structuring with unique ID
         """
         try:
             contents = await file.read()
@@ -980,7 +982,7 @@ class MedicalImageAnalyzer:
             }
             
             # Perform AI analysis
-            raw_response, findings, ai_attention_heatmap, new_saliency_map, probability_map, segmentation_map = await self.analyze_image(image)
+            raw_response, findings, ai_attention_heatmap = await self.analyze_image(image)
             
             # Generate unique analysis ID and timestamp
             analysis_id = str(uuid.uuid4())
@@ -994,16 +996,16 @@ class MedicalImageAnalyzer:
                 image_metadata=image_metadata
             )
             
-            return analysis_response, image, ai_attention_heatmap, new_saliency_map, probability_map, segmentation_map
+            return analysis_response, image, ai_attention_heatmap
             
         except Exception as e:
             logger.error(f"Error analyzing uploaded image: {str(e)}")
             if isinstance(e, HTTPException):            raise
             raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
-    async def analyze_image_from_url(self, image_url: str) -> tuple[AnalysisResponse, Image.Image, Image.Image, Image.Image, Image.Image, Image.Image]:
+    async def analyze_image_from_url(self, image_url: str) -> tuple[AnalysisResponse, Image.Image, Image.Image]:
         """
-        Analyze medical image from URL and return complete analysis response with images.
+        Analyze medical image from URL and return analysis response with heatmap.
         
         Downloads and analyzes medical images from HTTP/HTTPS URLs with comprehensive
         validation, security checks, and metadata collection.
@@ -1012,31 +1014,20 @@ class MedicalImageAnalyzer:
             image_url: Valid HTTP/HTTPS URL pointing to a medical image
 
         Returns:
-            tuple: (AnalysisResponse, original_image, ai_attention_heatmap, new_saliency_map, probability_map, segmentation_map)
+            tuple: (AnalysisResponse, original_image, ai_attention_heatmap)
             - AnalysisResponse: Complete analysis results
             - original_image: Original PIL Image
             - ai_attention_heatmap: AI Attention Heatmap (colored overlay)
-            - new_saliency_map: Grayscale Saliency Map
-            - probability_map: Grayscale Probability Map
-            - segmentation_map: Segmentation Map with contours
             
         Raises:
             HTTPException: If URL fetch or analysis fails
-            
-        Security Features:
-        - URL validation and format checking
-        - Protocol restriction (HTTP/HTTPS only)
-        - Content-Type verification
-        - File size limitations
-        - Timeout protection
-        - Comprehensive error handling
         """
         try:
             # Fetch image with security validation
             image, image_metadata = await self.fetch_image_from_url(image_url)
             
             # Perform AI analysis
-            raw_response, findings, ai_attention_heatmap, new_saliency_map, probability_map, segmentation_map = await self.analyze_image(image)
+            raw_response, findings, ai_attention_heatmap = await self.analyze_image(image)
             
             # Generate unique analysis ID and timestamp
             analysis_id = str(uuid.uuid4())
@@ -1056,7 +1047,7 @@ class MedicalImageAnalyzer:
                 image_metadata=image_metadata
             )
             
-            return analysis_response, image, ai_attention_heatmap, new_saliency_map, probability_map, segmentation_map
+            return analysis_response, image, ai_attention_heatmap
             
         except Exception as e:
             logger.error(f"Error analyzing image from URL: {str(e)}")
@@ -1218,7 +1209,7 @@ async def analyze_and_generate_report(
     
     # Generate PDF in thread pool to avoid blocking the event loop
     pdf_path = await run_in_threadpool(
-        analyzer.generate_pdf_report, 
+        pdf_generator.generate_pdf_report,
         analysis_response,
         original_image,
         heatmap_image
@@ -1307,17 +1298,14 @@ async def analyze_url_and_generate_report(
         - Single AI inference run (no duplicate processing)
     """
     # Perform analysis once - this includes heatmap generation
-    analysis_response, original_image, heatmap_image, saliency_map, probability_map, segmentation_map  = await analyzer.analyze_image_from_url(str(request.image_url))
+    analysis_response, original_image, heatmap_image  = await analyzer.analyze_image_from_url(str(request.image_url))
     
     # Generate PDF in thread pool to avoid blocking the event loop
     local_pdf_path = await run_in_threadpool(
         pdf_generator.generate_pdf_report, 
         analysis_response,
         original_image,
-        heatmap_image,
-        saliency_map,
-        probability_map,
-        segmentation_map
+        heatmap_image
     )
     
     # Define S3 bucket details (replace with your actual configuration)
