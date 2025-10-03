@@ -551,6 +551,133 @@ class UltimatePDFGenerator:
         
         return card_table
 
+    def _create_clinical_summary_card(self, findings):
+        """Create a clinical executive summary card"""
+        # Determine overall severity
+        is_positive = "positive" in findings.impression.lower()
+        
+        if is_positive:
+            severity_text = "⚠️ ABNORMALITIES DETECTED"
+            severity_color = self.colors['danger']
+            bg_color = self.colors['danger_ultra_light']
+        else:
+            severity_text = "✓ NO SIGNIFICANT ABNORMALITIES"
+            severity_color = self.colors['success']
+            bg_color = self.colors['success_ultra_light']
+        
+        summary_style = ParagraphStyle(
+            'SummaryHeader',
+            fontName=self.font_display,
+            fontSize=14,
+            textColor=severity_color,
+            leading=18,
+            alignment=TA_CENTER,
+            spaceAfter=8,
+            wordWrap='CJK'
+        )
+        
+        content = [
+            [Paragraph(severity_text, summary_style)],
+            [Paragraph(f"<b>Clinical Impression:</b> {findings.impression.replace('_', ' ').title()}", self.styles['clinical_summary'])],
+            [Paragraph(f"<b>Diagnostic Confidence:</b> {findings.confidence_level}", self.styles['clinical_summary'])],
+        ]
+        
+        summary_table = Table(content, colWidths=[6.5*inch])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), bg_color),
+            ('BOX', (0, 0), (-1, -1), 2, severity_color),
+            ('TOPPADDING', (0, 0), (-1, -1), 16),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 16),
+            ('LEFTPADDING', (0, 0), (-1, -1), 20),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 20),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [10, 10, 10, 10]),
+        ]))
+        
+        return summary_table
+
+    def _create_diagnostic_finding_card(self, condition, status, confidence, description=""):
+        """Create a professional diagnostic finding card for each condition"""
+        if status == "Detected":
+            status_icon = "⚠️"
+            status_color = self.colors['danger']
+            bg_color = self.colors['danger_ultra_light']
+            border_color = self.colors['danger']
+        else:
+            status_icon = "✓"
+            status_color = self.colors['success_dark']
+            bg_color = self.colors['success_ultra_light']
+            border_color = self.colors['success']
+        
+        # Confidence level styling
+        try:
+            conf_value = float(confidence.rstrip('%'))
+            if conf_value >= 80:
+                conf_color = self.colors['success_dark']
+                conf_bg = self.colors['success_light']
+            elif conf_value >= 50:
+                conf_color = self.colors['warning_dark']
+                conf_bg = self.colors['warning_light']
+            else:
+                conf_color = self.colors['gray_700']
+                conf_bg = self.colors['gray_300']
+        except:
+            conf_color = self.colors['gray_700']
+            conf_bg = self.colors['gray_300']
+        
+        condition_header = ParagraphStyle(
+            'ConditionHeader',
+            fontName=self.font_display,
+            fontSize=13,
+            textColor=self.colors['gray_900'],
+            leading=16,
+            wordWrap='CJK'
+        )
+        
+        status_style = ParagraphStyle(
+            'StatusStyle',
+            fontName=self.font_body_bold,
+            fontSize=11,
+            textColor=status_color,
+            leading=14,
+            wordWrap='CJK'
+        )
+        
+        conf_style = ParagraphStyle(
+            'ConfStyle',
+            fontName=self.font_body_bold,
+            fontSize=10,
+            textColor=conf_color,
+            leading=12,
+            alignment=TA_CENTER,
+            wordWrap='CJK'
+        )
+        
+        card_data = [
+            [Paragraph(f"<b>{condition}</b>", condition_header), "", Paragraph(confidence if confidence != "N/A" else "—", conf_style)],
+            [Paragraph(f"{status_icon} {status}", status_style), "", ""]
+        ]
+        
+        if description and status == "Detected":
+            card_data.append([Paragraph(f"<i>{description}</i>", self.styles['technical']), "", ""])
+        
+        card_table = Table(card_data, colWidths=[4*inch, 0.3*inch, 1.2*inch])
+        card_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), bg_color),
+            ('BOX', (0, 0), (-1, -1), 2, border_color),
+            ('SPAN', (0, 1), (1, 1)),
+            ('TOPPADDING', (0, 0), (-1, -1), 12),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+            ('LEFTPADDING', (0, 0), (-1, -1), 16),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 16),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('BACKGROUND', (2, 0), (2, 0), conf_bg),
+            ('BOX', (2, 0), (2, 0), 1, conf_color),
+            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
+        ]))
+        
+        return card_table
+
     def _create_metadata_section(self, analysis_response):
         """Create beautiful metadata section"""
         metadata = analysis_response.image_metadata
