@@ -1,6 +1,7 @@
 import os
 import io
 import logging
+import re
 from datetime import datetime
 from PIL import Image, ImageFilter
 from reportlab.lib.pagesizes import letter

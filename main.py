@@ -1249,31 +1249,6 @@ async def list_reports():
         logger.error(f"Error listing reports: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to list reports")
 
-
-@app.post("/analyze-url", response_model=AnalysisResponse)
-async def analyze_image_url(request: ImageURLRequest):
-    """
-    Analyze medical image from HTTP/HTTPS URL using Med-GEMMA-3.
-    
-    Downloads and analyzes medical images from remote URLs with comprehensive
-    security validation and error handling.
-    
-    Args:
-        request: ImageURLRequest containing the image URL
-        
-    Returns:
-        AnalysisResponse: Complete analysis results with structured findings
-        
-    Security Features:
-        - URL format validation using Pydantic HttpUrl
-        - Content-Type verification
-        - File size restrictions
-        - Timeout protection
-        - Protocol validation (HTTP/HTTPS only)
-    """
-    analysis_response, _, _ = await analyzer.analyze_image_from_url(str(request.image_url))
-    return analysis_response
-
 # The working path for the PDF report generation
 @app.post("/analyze-url-and-report", response_model=PDFGenerationResponse)
 async def analyze_url_and_generate_report(
