@@ -20,3 +20,5 @@ opencv-python
 numpy
 bitsandbytes
 accelerate
+hf_transfer
+huggingface_hub
