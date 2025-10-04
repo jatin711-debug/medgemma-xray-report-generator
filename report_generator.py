@@ -186,8 +186,8 @@ class DeepMindMetricCard(Flowable):
         canvas.restoreState()
 
 class ConfidenceGauge(Flowable):
-    """DeepMind-style confidence gauge visualization"""
-    def __init__(self, confidence_value, width=200, height=130):
+    """Enhanced DeepMind-style confidence gauge with better visuals"""
+    def __init__(self, confidence_value, width=240, height=140):
         Flowable.__init__(self)
         self.width = width
         self.height = height
@@ -202,15 +202,33 @@ class ConfidenceGauge(Flowable):
         
         # Center point
         cx = self.width / 2
-        cy = 45
-        radius = 40
+        cy = 50
+        radius = 45
         
-        # Background arc - lighter and cleaner
-        canvas.setStrokeColor(colors.HexColor("#EEEEEE"))
-        canvas.setLineWidth(10)
+        # Outer glow effect - multiple layers
+        for i in range(3):
+            glow_radius = radius + 12 - (i * 4)
+            alpha = 0.03 + (i * 0.01)
+            canvas.setStrokeColor(colors.Color(0.5, 0.7, 1.0, alpha=alpha))
+            canvas.setLineWidth(8 - (i * 2))
+            canvas.setLineCap(1)
+            
+            path = canvas.beginPath()
+            for angle in range(180, 360, 2):
+                rad = math.radians(angle)
+                x = cx + glow_radius * math.cos(rad)
+                y = cy + glow_radius * math.sin(rad)
+                if angle == 180:
+                    path.moveTo(x, y)
+                else:
+                    path.lineTo(x, y)
+            canvas.drawPath(path, stroke=1, fill=0)
+        
+        # Background arc - clean and minimal
+        canvas.setStrokeColor(colors.HexColor("#F0F0F0"))
+        canvas.setLineWidth(12)
         canvas.setLineCap(1)
         
-        # Draw background semicircle
         path = canvas.beginPath()
         for angle in range(180, 360, 1):
             rad = math.radians(angle)
@@ -222,66 +240,121 @@ class ConfidenceGauge(Flowable):
                 path.lineTo(x, y)
         canvas.drawPath(path, stroke=1, fill=0)
         
-        # Confidence arc with color gradient effect
+        # Confidence arc with smooth gradient-like effect
         end_angle = 180 + (self.value / 100.0) * 180
         
         # Color based on confidence level
-        if self.value >= 85:
+        if self.value >= 90:
             arc_color = colors.HexColor("#4CAF50")
             label_color = colors.HexColor("#2E7D32")
-        elif self.value >= 70:
+            desc = "Very High"
+            desc_bg = colors.HexColor("#E8F5E9")
+        elif self.value >= 75:
             arc_color = colors.HexColor("#2196F3")
             label_color = colors.HexColor("#1565C0")
-        elif self.value >= 50:
+            desc = "High"
+            desc_bg = colors.HexColor("#E3F2FD")
+        elif self.value >= 60:
+            arc_color = colors.HexColor("#FFC107")
+            label_color = colors.HexColor("#F57C00")
+            desc = "Moderate"
+            desc_bg = colors.HexColor("#FFF8E1")
+        elif self.value >= 40:
             arc_color = colors.HexColor("#FF9800")
             label_color = colors.HexColor("#E65100")
+            desc = "Fair"
+            desc_bg = colors.HexColor("#FFE0B2")
         else:
             arc_color = colors.HexColor("#F44336")
             label_color = colors.HexColor("#C62828")
-        
-        canvas.setStrokeColor(arc_color)
-        canvas.setLineWidth(10)
-        
-        path2 = canvas.beginPath()
-        for angle_deg in range(180, int(end_angle), 1):
-            rad = math.radians(angle_deg)
-            x = cx + radius * math.cos(rad)
-            y = cy + radius * math.sin(rad)
-            if angle_deg == 180:
-                path2.moveTo(x, y)
-            else:
-                path2.lineTo(x, y)
-        canvas.drawPath(path2, stroke=1, fill=0)
-        
-        # Center value - larger and bolder
-        canvas.setFillColor(colors.HexColor("#1A237E"))
-        canvas.setFont("Helvetica-Bold", 28)
-        canvas.drawCentredString(cx, cy - 8, f"{int(self.value)}%")
-        
-        # Label
-        canvas.setFont("Helvetica", 9)
-        canvas.setFillColor(colors.HexColor("#757575"))
-        canvas.drawCentredString(cx, cy - 32, "MODEL CONFIDENCE")
-        
-        # Confidence level description
-        if self.value >= 85:
-            desc = "Very High"
-        elif self.value >= 70:
-            desc = "High"
-        elif self.value >= 50:
-            desc = "Moderate"
-        else:
             desc = "Low"
+            desc_bg = colors.HexColor("#FFEBEE")
         
-        canvas.setFont("Helvetica-Bold", 10)
+        # Draw confidence arc with varying width for 3D effect
+        for offset in range(3):
+            alpha = 1.0 - (offset * 0.15)
+            canvas.setStrokeColor(colors.Color(arc_color.red, arc_color.green, arc_color.blue, alpha=alpha))
+            canvas.setLineWidth(12 - offset)
+            
+            path2 = canvas.beginPath()
+            for angle_deg in range(180, int(end_angle), 1):
+                rad = math.radians(angle_deg)
+                x = cx + radius * math.cos(rad)
+                y = cy + radius * math.sin(rad)
+                if angle_deg == 180:
+                    path2.moveTo(x, y)
+                else:
+                    path2.lineTo(x, y)
+            canvas.drawPath(path2, stroke=1, fill=0)
+        
+        # Inner circle for clean center
+        canvas.setFillColor(colors.white)
+        canvas.circle(cx, cy, radius - 20, fill=1, stroke=0)
+        
+        # Subtle inner shadow
+        canvas.setStrokeColor(colors.HexColor("#E0E0E0"))
+        canvas.setLineWidth(0.5)
+        canvas.circle(cx, cy, radius - 20, fill=0, stroke=1)
+        
+        # Center value - large and prominent
+        canvas.setFillColor(colors.HexColor("#1A237E"))
+        canvas.setFont("Helvetica-Bold", 32)
+        canvas.drawCentredString(cx, cy - 10, f"{int(self.value)}%")
+        
+        # "CONFIDENCE" label below value
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#9E9E9E"))
+        canvas.drawCentredString(cx, cy - 30, "CONFIDENCE")
+        
+        # Confidence level badge at bottom
+        badge_y = 8
+        badge_width = 80
+        badge_height = 24
+        badge_x = cx - (badge_width / 2)
+        
+        # Badge background with rounded corners
+        canvas.setFillColor(desc_bg)
+        canvas.roundRect(badge_x, badge_y, badge_width, badge_height, 12, fill=1, stroke=0)
+        
+        # Badge border
+        canvas.setStrokeColor(label_color)
+        canvas.setLineWidth(1.5)
+        canvas.roundRect(badge_x, badge_y, badge_width, badge_height, 12, fill=0, stroke=1)
+        
+        # Badge text
+        canvas.setFont("Helvetica-Bold", 11)
         canvas.setFillColor(label_color)
-        canvas.drawCentredString(cx, 10, desc)
+        canvas.drawCentredString(cx, badge_y + 8, desc.upper())
+        
+        # Tick marks for scale
+        canvas.setStrokeColor(colors.HexColor("#BDBDBD"))
+        canvas.setLineWidth(1)
+        
+        for pct in [0, 25, 50, 75, 100]:
+            angle = 180 + (pct / 100.0) * 180
+            rad = math.radians(angle)
+            
+            # Outer tick
+            x1 = cx + (radius + 2) * math.cos(rad)
+            y1 = cy + (radius + 2) * math.sin(rad)
+            x2 = cx + (radius + 8) * math.cos(rad)
+            y2 = cy + (radius + 8) * math.sin(rad)
+            
+            canvas.line(x1, y1, x2, y2)
+            
+            # Tick label
+            if pct in [0, 50, 100]:
+                canvas.setFont("Helvetica", 7)
+                canvas.setFillColor(colors.HexColor("#9E9E9E"))
+                label_x = cx + (radius + 16) * math.cos(rad)
+                label_y = cy + (radius + 16) * math.sin(rad) - 3
+                canvas.drawCentredString(label_x, label_y, f"{pct}")
         
         canvas.restoreState()
 
 class RiskMatrix(Flowable):
-    """DeepMind-style risk assessment matrix"""
-    def __init__(self, conditions_data, width=320, height=145):
+    """Enhanced DeepMind-style risk assessment matrix"""
+    def __init__(self, conditions_data, width=340, height=155):
         Flowable.__init__(self)
         self.width = width
         self.height = height
@@ -291,17 +364,17 @@ class RiskMatrix(Flowable):
         canvas = self.canv
         canvas.saveState()
         
-        # Title
+        # Title with icon
         canvas.setFont("Helvetica-Bold", 11)
         canvas.setFillColor(colors.HexColor("#424242"))
-        canvas.drawString(0, self.height - 18, "CONDITION RISK MATRIX")
+        canvas.drawString(0, self.height - 20, "📊 CONDITION RISK ASSESSMENT")
         
-        bar_height = 24
-        bar_spacing = 10
-        start_y = self.height - 50
-        label_width = 90
-        bar_start = label_width + 10
-        bar_max_width = self.width - bar_start - 40
+        bar_height = 26
+        bar_spacing = 11
+        start_y = self.height - 55
+        label_width = 95
+        bar_start = label_width + 12
+        bar_max_width = self.width - bar_start - 45
         
         for i, (condition, confidence) in enumerate(self.conditions):
             y_pos = start_y - (i * (bar_height + bar_spacing))
@@ -311,47 +384,75 @@ class RiskMatrix(Flowable):
             except:
                 conf_val = 0
             
-            # Background bar with subtle border
-            canvas.setFillColor(colors.HexColor("#F5F5F5"))
-            canvas.roundRect(bar_start, y_pos, bar_max_width, bar_height, 3, fill=1, stroke=0)
+            # Card background with subtle shadow
+            shadow_offset = 2
+            canvas.setFillColor(colors.Color(0, 0, 0, alpha=0.03))
+            canvas.roundRect(0 + shadow_offset, y_pos - shadow_offset, self.width, bar_height, 4, fill=1, stroke=0)
             
-            # Border
-            canvas.setStrokeColor(colors.HexColor("#E0E0E0"))
+            # Card background
+            canvas.setFillColor(colors.white)
+            canvas.roundRect(0, y_pos, self.width, bar_height, 4, fill=1, stroke=0)
+            
+            # Subtle border
+            canvas.setStrokeColor(colors.HexColor("#E8E8E8"))
             canvas.setLineWidth(0.5)
-            canvas.roundRect(bar_start, y_pos, bar_max_width, bar_height, 3, fill=0, stroke=1)
+            canvas.roundRect(0, y_pos, self.width, bar_height, 4, fill=0, stroke=1)
             
-            # Confidence bar with rounded corners
+            # Background progress bar
+            canvas.setFillColor(colors.HexColor("#F8F8F8"))
+            canvas.roundRect(bar_start, y_pos + 3, bar_max_width, bar_height - 6, 3, fill=1, stroke=0)
+            
+            # Confidence bar with gradient effect
             bar_width = (conf_val / 100.0) * bar_max_width
             if bar_width > 0:
                 if conf_val >= 70:
                     bar_color = colors.HexColor("#EF5350")
+                    bar_light = colors.HexColor("#FF7875")
                     text_color = colors.white
                 elif conf_val >= 40:
                     bar_color = colors.HexColor("#FF9800")
+                    bar_light = colors.HexColor("#FFB74D")
                     text_color = colors.white
                 else:
                     bar_color = colors.HexColor("#66BB6A")
+                    bar_light = colors.HexColor("#81C784")
                     text_color = colors.white
                 
-                canvas.setFillColor(bar_color)
-                canvas.roundRect(bar_start, y_pos, bar_width, bar_height, 3, fill=1, stroke=0)
+                # Gradient effect with multiple layers
+                for layer in range(3):
+                    alpha = 1.0 - (layer * 0.15)
+                    layer_color = colors.Color(bar_color.red, bar_color.green, bar_color.blue, alpha=alpha)
+                    canvas.setFillColor(layer_color)
+                    layer_height = (bar_height - 6 - (layer * 2))
+                    canvas.roundRect(bar_start, y_pos + 3 + layer, bar_width, layer_height, 3, fill=1, stroke=0)
                 
-                # Percentage inside bar if there's room
-                if bar_width > 35:
-                    canvas.setFont("Helvetica-Bold", 10)
+                # Percentage inside bar if space available
+                if bar_width > 40:
+                    canvas.setFont("Helvetica-Bold", 11)
                     canvas.setFillColor(text_color)
-                    canvas.drawString(bar_start + 8, y_pos + 8, f"{int(conf_val)}%")
+                    canvas.drawString(bar_start + 10, y_pos + 9, f"{int(conf_val)}%")
             
-            # Condition label
+            # Condition label with icon
+            condition_icons = {
+                "Pneumothorax": "🫁",
+                "Pneumonia": "🦠",
+                "TB": "⚕️"
+            }
+            icon = condition_icons.get(condition, "•")
+            
+            canvas.setFont("Helvetica", 9)
+            canvas.setFillColor(colors.HexColor("#757575"))
+            canvas.drawString(8, y_pos + 13, icon)
+            
             canvas.setFont("Helvetica-Bold", 10)
             canvas.setFillColor(colors.HexColor("#424242"))
-            canvas.drawString(0, y_pos + 8, condition)
+            canvas.drawString(22, y_pos + 9, condition)
             
             # Percentage on right if not in bar
-            if bar_width <= 35:
-                canvas.setFont("Helvetica-Bold", 9)
+            if bar_width <= 40:
+                canvas.setFont("Helvetica-Bold", 10)
                 canvas.setFillColor(colors.HexColor("#757575"))
-                canvas.drawRightString(self.width, y_pos + 8, f"{int(conf_val)}%")
+                canvas.drawRightString(self.width - 8, y_pos + 9, f"{int(conf_val)}%")
         
         canvas.restoreState()
 
@@ -952,15 +1053,41 @@ class UltimatePDFGenerator:
         
         # === CONFIDENCE VISUALIZATION ===
         story.append(Paragraph("MODEL CONFIDENCE ASSESSMENT", self.styles['section_header']))
-        story.append(Spacer(1, 16))
+        story.append(Spacer(1, 18))
         
         try:
             conf_val = float(findings.confidence_level.rstrip('%'))
         except:
             conf_val = 0
         
+        # Center the gauge
         gauge = ConfidenceGauge(conf_val)
-        story.append(gauge)
+        gauge_table = Table([[gauge]], colWidths=[3.5*inch])
+        gauge_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (0, 0), 'CENTER'),
+        ]))
+        story.append(gauge_table)
+        story.append(Spacer(1, 20))
+        
+        # Add interpretation text
+        if conf_val >= 90:
+            interp = "The model demonstrates <b>exceptional confidence</b> in its analysis, indicating strong pattern recognition across all evaluated conditions."
+        elif conf_val >= 75:
+            interp = "The model shows <b>high confidence</b> in its diagnostic assessment, with clear identification of relevant features."
+        elif conf_val >= 60:
+            interp = "The model exhibits <b>moderate confidence</b>. Consider additional clinical correlation for comprehensive evaluation."
+        else:
+            interp = "The model shows <b>limited confidence</b>. Further diagnostic imaging or clinical assessment is strongly recommended."
+        
+        interp_para = Paragraph(interp, self.styles['technical'])
+        interp_table = Table([[interp_para]], colWidths=[5*inch])
+        interp_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), self.colors['gray_50']),
+            ('BOX', (0, 0), (-1, -1), 0.5, self.colors['gray_300']),
+            ('PADDING', (0, 0), (-1, -1), 14),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ]))
+        story.append(interp_table)
         story.append(Spacer(1, 35))
         
         # === STUDY METADATA ===
