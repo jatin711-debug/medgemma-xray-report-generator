@@ -252,11 +252,21 @@ class DeepMindStylePDFGenerator:
             'Summary', parent=self.styles['body'], 
             textColor=self.palette['text_primary'], fontSize=11, leading=18
         )
+
+        # --- FIX IS HERE ---
+        # Get the color object and reliably convert it to a hex string
+        text_secondary_color_obj = self.palette['text_secondary']
+        hex_color_str = f"#{int(text_secondary_color_obj.red*255):02x}{int(text_secondary_color_obj.green*255):02x}{int(text_secondary_color_obj.blue*255):02x}"
+        
+        summary_paragraph = Paragraph(
+            f"<b>{status_text}</b><br/><font color='{hex_color_str}'>Impression: {findings.impression.replace('_', ' ').title()}</font>",
+            summary_style
+        )
         
         content = [
             [
                 icon,
-                Paragraph(f"<b>{status_text}</b><br/><font color='{self.palette['text_secondary'].toHex()}'>Impression: {findings.impression.replace('_', ' ').title()}</font>", summary_style)
+                summary_paragraph
             ]
         ]
         
@@ -271,7 +281,6 @@ class DeepMindStylePDFGenerator:
             ('LINEBEFORE', (0, 0), (0, -1), 4, status_color), # Key design element: side-border
         ]))
         return table
-
     def _create_diagnostic_finding_card(self, condition, status, confidence_str):
         """Creates an individual finding card with a confidence bar."""
         try:
