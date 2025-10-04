@@ -183,6 +183,17 @@ class DeepMindStylePDFGenerator:
             ),
         }
 
+    def _color_to_pil_rgb(self, color):
+        """Convert reportlab Color object to PIL-compatible RGB tuple (0-255 range)."""
+        if hasattr(color, 'rgb'):
+            r, g, b = color.rgb()
+            return (int(r * 255), int(g * 255), int(b * 255))
+        elif hasattr(color, 'red'):
+            return (int(color.red * 255), int(color.green * 255), int(color.blue * 255))
+        else:
+            # Fallback for hex colors or other formats
+            return (128, 128, 128)  # Gray fallback
+
     def _on_page(self, canvas, doc):
         """Draws the header and footer on each page."""
         canvas.saveState()
@@ -217,8 +228,9 @@ class DeepMindStylePDFGenerator:
         if pil_image.mode != 'RGB':
             pil_image = pil_image.convert('RGB')
 
-        # Add border
-        bordered = Image.new('RGB', (pil_image.width + 2, pil_image.height + 2), self.palette['border'].toRGB())
+        # Add border - convert reportlab color to PIL RGB tuple
+        border_rgb = self._color_to_pil_rgb(self.palette['border'])
+        bordered = Image.new('RGB', (pil_image.width + 2, pil_image.height + 2), border_rgb)
         bordered.paste(pil_image, (1, 1))
 
         # Create shadow
