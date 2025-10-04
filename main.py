@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, HttpUrl
 from PIL import Image
-from report_generator import DeepMindStylePDFGenerator
+from report_generator import UltimatePDFGenerator
 import gc
 import torch
 from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
@@ -56,7 +56,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-pdf_generator = DeepMindStylePDFGenerator("reports")
+pdf_generator = UltimatePDFGenerator("reports")
 
 
 # Request models
