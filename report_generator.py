@@ -8,16 +8,13 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.lib.units import inch
 from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY, TA_RIGHT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, 
-    PageBreak, Image as ReportLabImage, KeepTogether, Flowable
+    PageBreak, Image as ReportLabImage, Flowable
 )
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.graphics.shapes import Drawing, Rect, String, Circle, Wedge
-from reportlab.graphics import renderPDF
-from reportlab.lib.utils import ImageReader
 import math
 
 # Setup basic logging
@@ -85,9 +82,112 @@ class PremiumCard(Flowable):
         
         canvas.restoreState()
 
+class DeepMindMetricCard(Flowable):
+    """Clean, modern metric card in DeepMind style"""
+    def __init__(self, value, label, sublabel="", width=140, height=100, icon=""):
+        Flowable.__init__(self)
+        self.width = width
+        self.height = height
+        self.value = str(value).strip()
+        self.label = label
+        self.sublabel = sublabel
+        self.icon = icon
+    
+    def draw(self):
+        canvas = self.canv
+        canvas.saveState()
+        
+        # Subtle background with slight gradient effect
+        canvas.setFillColor(colors.HexColor("#FAFAFA"))
+        canvas.roundRect(0, 0, self.width, self.height, 6, fill=1, stroke=0)
+        
+        # Subtle border
+        canvas.setStrokeColor(colors.HexColor("#E0E0E0"))
+        canvas.setLineWidth(0.5)
+        canvas.roundRect(0, 0, self.width, self.height, 6, fill=0, stroke=1)
+        
+        # Top accent line - thinner and more elegant
+        canvas.setStrokeColor(colors.HexColor("#1976D2"))
+        canvas.setLineWidth(2)
+        canvas.line(0, self.height - 2, self.width, self.height - 2)
+        
+        # Icon if provided
+        y_start = self.height - 25
+        if self.icon:
+            canvas.setFont("Helvetica", 16)
+            canvas.setFillColor(colors.HexColor("#1976D2"))
+            canvas.drawCentredString(self.width/2, y_start, self.icon)
+            y_start -= 20
+        
+        # Value - handle long text with better wrapping
+        value_text = self.value.replace('\n', ' ')
+        
+        # Dynamic font sizing
+        if len(value_text) > 25:
+            font_size = 12
+            max_chars_per_line = 16
+        elif len(value_text) > 20:
+            font_size = 14
+            max_chars_per_line = 18
+        elif len(value_text) > 12:
+            font_size = 18
+            max_chars_per_line = 20
+        else:
+            font_size = 26
+            max_chars_per_line = 100  # No wrapping needed
+        
+        canvas.setFont("Helvetica-Bold", font_size)
+        canvas.setFillColor(colors.HexColor("#1A237E"))
+        
+        # Intelligent text wrapping
+        if len(value_text) > max_chars_per_line:
+            words = value_text.split()
+            lines = []
+            current_line = []
+            current_length = 0
+            
+            for word in words:
+                test_length = current_length + len(word) + (1 if current_line else 0)
+                if test_length > max_chars_per_line and current_line:
+                    lines.append(' '.join(current_line))
+                    current_line = [word]
+                    current_length = len(word)
+                else:
+                    current_line.append(word)
+                    current_length = test_length
+            
+            if current_line:
+                lines.append(' '.join(current_line))
+            
+            # Draw multiple lines centered
+            line_height = font_size + 3
+            total_height = len(lines) * line_height
+            start_y = y_start - (total_height / 2) + line_height
+            
+            for i, line in enumerate(lines):
+                canvas.drawCentredString(self.width/2, start_y - (i * line_height), line)
+        else:
+            canvas.drawCentredString(self.width/2, y_start - 10, value_text)
+        
+        # Label - uppercase and tracked
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#757575"))
+        
+        # Letter spacing simulation for label
+        label_text = self.label.upper()
+        canvas.drawCentredString(self.width/2, 18, label_text)
+        
+        # Sublabel
+        if self.sublabel:
+            canvas.setFont("Helvetica", 7)
+            canvas.setFillColor(colors.HexColor("#9E9E9E"))
+            canvas.drawCentredString(self.width/2, 8, self.sublabel)
+        
+        canvas.restoreState()
+
 class ConfidenceGauge(Flowable):
     """DeepMind-style confidence gauge visualization"""
-    def __init__(self, confidence_value, width=180, height=120):
+    def __init__(self, confidence_value, width=200, height=130):
         Flowable.__init__(self)
         self.width = width
         self.height = height
@@ -102,17 +202,17 @@ class ConfidenceGauge(Flowable):
         
         # Center point
         cx = self.width / 2
-        cy = 40
-        radius = 35
+        cy = 45
+        radius = 40
         
-        # Background arc
-        canvas.setStrokeColor(colors.HexColor("#E8EAF6"))
-        canvas.setLineWidth(8)
+        # Background arc - lighter and cleaner
+        canvas.setStrokeColor(colors.HexColor("#EEEEEE"))
+        canvas.setLineWidth(10)
         canvas.setLineCap(1)
         
         # Draw background semicircle
         path = canvas.beginPath()
-        for angle in range(180, 360, 2):
+        for angle in range(180, 360, 1):
             rad = math.radians(angle)
             x = cx + radius * math.cos(rad)
             y = cy + radius * math.sin(rad)
@@ -122,23 +222,28 @@ class ConfidenceGauge(Flowable):
                 path.lineTo(x, y)
         canvas.drawPath(path, stroke=1, fill=0)
         
-        # Confidence arc
+        # Confidence arc with color gradient effect
         end_angle = 180 + (self.value / 100.0) * 180
         
-        if self.value >= 80:
+        # Color based on confidence level
+        if self.value >= 85:
             arc_color = colors.HexColor("#4CAF50")
-        elif self.value >= 60:
+            label_color = colors.HexColor("#2E7D32")
+        elif self.value >= 70:
             arc_color = colors.HexColor("#2196F3")
-        elif self.value >= 40:
+            label_color = colors.HexColor("#1565C0")
+        elif self.value >= 50:
             arc_color = colors.HexColor("#FF9800")
+            label_color = colors.HexColor("#E65100")
         else:
             arc_color = colors.HexColor("#F44336")
+            label_color = colors.HexColor("#C62828")
         
         canvas.setStrokeColor(arc_color)
-        canvas.setLineWidth(8)
+        canvas.setLineWidth(10)
         
         path2 = canvas.beginPath()
-        for angle_deg in range(180, int(end_angle), 2):
+        for angle_deg in range(180, int(end_angle), 1):
             rad = math.radians(angle_deg)
             x = cx + radius * math.cos(rad)
             y = cy + radius * math.sin(rad)
@@ -148,21 +253,35 @@ class ConfidenceGauge(Flowable):
                 path2.lineTo(x, y)
         canvas.drawPath(path2, stroke=1, fill=0)
         
-        # Center value
+        # Center value - larger and bolder
         canvas.setFillColor(colors.HexColor("#1A237E"))
-        canvas.setFont("Helvetica-Bold", 22)
-        canvas.drawCentredString(cx, cy - 5, f"{int(self.value)}%")
+        canvas.setFont("Helvetica-Bold", 28)
+        canvas.drawCentredString(cx, cy - 8, f"{int(self.value)}%")
         
         # Label
         canvas.setFont("Helvetica", 9)
-        canvas.setFillColor(colors.HexColor("#616161"))
-        canvas.drawCentredString(cx, cy - 25, "CONFIDENCE")
+        canvas.setFillColor(colors.HexColor("#757575"))
+        canvas.drawCentredString(cx, cy - 32, "MODEL CONFIDENCE")
+        
+        # Confidence level description
+        if self.value >= 85:
+            desc = "Very High"
+        elif self.value >= 70:
+            desc = "High"
+        elif self.value >= 50:
+            desc = "Moderate"
+        else:
+            desc = "Low"
+        
+        canvas.setFont("Helvetica-Bold", 10)
+        canvas.setFillColor(label_color)
+        canvas.drawCentredString(cx, 10, desc)
         
         canvas.restoreState()
 
 class RiskMatrix(Flowable):
     """DeepMind-style risk assessment matrix"""
-    def __init__(self, conditions_data, width=280, height=140):
+    def __init__(self, conditions_data, width=320, height=145):
         Flowable.__init__(self)
         self.width = width
         self.height = height
@@ -173,13 +292,16 @@ class RiskMatrix(Flowable):
         canvas.saveState()
         
         # Title
-        canvas.setFont("Helvetica-Bold", 10)
-        canvas.setFillColor(colors.HexColor("#37474F"))
-        canvas.drawString(0, self.height - 15, "MULTI-CONDITION RISK ASSESSMENT")
+        canvas.setFont("Helvetica-Bold", 11)
+        canvas.setFillColor(colors.HexColor("#424242"))
+        canvas.drawString(0, self.height - 18, "CONDITION RISK MATRIX")
         
-        bar_height = 20
-        bar_spacing = 8
-        start_y = self.height - 45
+        bar_height = 24
+        bar_spacing = 10
+        start_y = self.height - 50
+        label_width = 90
+        bar_start = label_width + 10
+        bar_max_width = self.width - bar_start - 40
         
         for i, (condition, confidence) in enumerate(self.conditions):
             y_pos = start_y - (i * (bar_height + bar_spacing))
@@ -189,80 +311,49 @@ class RiskMatrix(Flowable):
             except:
                 conf_val = 0
             
-            # Background bar
-            canvas.setFillColor(colors.HexColor("#ECEFF1"))
-            canvas.rect(100, y_pos, 170, bar_height, fill=1, stroke=0)
+            # Background bar with subtle border
+            canvas.setFillColor(colors.HexColor("#F5F5F5"))
+            canvas.roundRect(bar_start, y_pos, bar_max_width, bar_height, 3, fill=1, stroke=0)
             
-            # Confidence bar
-            bar_width = (conf_val / 100.0) * 170
-            if conf_val >= 70:
-                bar_color = colors.HexColor("#EF5350")
-            elif conf_val >= 40:
-                bar_color = colors.HexColor("#FFA726")
-            else:
-                bar_color = colors.HexColor("#66BB6A")
+            # Border
+            canvas.setStrokeColor(colors.HexColor("#E0E0E0"))
+            canvas.setLineWidth(0.5)
+            canvas.roundRect(bar_start, y_pos, bar_max_width, bar_height, 3, fill=0, stroke=1)
             
-            canvas.setFillColor(bar_color)
-            canvas.rect(100, y_pos, bar_width, bar_height, fill=1, stroke=0)
+            # Confidence bar with rounded corners
+            bar_width = (conf_val / 100.0) * bar_max_width
+            if bar_width > 0:
+                if conf_val >= 70:
+                    bar_color = colors.HexColor("#EF5350")
+                    text_color = colors.white
+                elif conf_val >= 40:
+                    bar_color = colors.HexColor("#FF9800")
+                    text_color = colors.white
+                else:
+                    bar_color = colors.HexColor("#66BB6A")
+                    text_color = colors.white
+                
+                canvas.setFillColor(bar_color)
+                canvas.roundRect(bar_start, y_pos, bar_width, bar_height, 3, fill=1, stroke=0)
+                
+                # Percentage inside bar if there's room
+                if bar_width > 35:
+                    canvas.setFont("Helvetica-Bold", 10)
+                    canvas.setFillColor(text_color)
+                    canvas.drawString(bar_start + 8, y_pos + 8, f"{int(conf_val)}%")
             
             # Condition label
-            canvas.setFont("Helvetica", 9)
-            canvas.setFillColor(colors.HexColor("#37474F"))
-            canvas.drawString(0, y_pos + 6, condition)
+            canvas.setFont("Helvetica-Bold", 10)
+            canvas.setFillColor(colors.HexColor("#424242"))
+            canvas.drawString(0, y_pos + 8, condition)
             
-            # Percentage
-            canvas.setFont("Helvetica-Bold", 9)
-            canvas.setFillColor(colors.HexColor("#FFFFFF") if conf_val > 30 else colors.HexColor("#37474F"))
-            canvas.drawString(105, y_pos + 6, f"{int(conf_val)}%")
+            # Percentage on right if not in bar
+            if bar_width <= 35:
+                canvas.setFont("Helvetica-Bold", 9)
+                canvas.setFillColor(colors.HexColor("#757575"))
+                canvas.drawRightString(self.width, y_pos + 8, f"{int(conf_val)}%")
         
         canvas.restoreState()
-
-class DeepMindMetricCard(Flowable):
-    """Clean, modern metric card in DeepMind style"""
-    def __init__(self, value, label, sublabel="", width=140, height=90):
-        Flowable.__init__(self)
-        self.width = width
-        self.height = height
-        self.value = value
-        self.label = label
-        self.sublabel = sublabel
-    
-    def draw(self):
-        canvas = self.canv
-        canvas.saveState()
-        
-        # Subtle background
-        canvas.setFillColor(colors.HexColor("#FAFAFA"))
-        canvas.roundRect(0, 0, self.width, self.height, 4, fill=1, stroke=0)
-        
-        # Left accent line
-        canvas.setFillColor(colors.HexColor("#1976D2"))
-        canvas.rect(0, 0, 3, self.height, fill=1, stroke=0)
-        
-        # Value
-        canvas.setFont("Helvetica-Bold", 24)
-        canvas.setFillColor(colors.HexColor("#1A237E"))
-        
-        # Handle multi-line values
-        value_str = str(self.value).replace('\n', ' ').strip()
-        if len(value_str) > 15:
-            canvas.setFont("Helvetica-Bold", 18)
-        canvas.drawCentredString(self.width/2, self.height - 40, value_str)
-        
-        # Label
-        canvas.setFont("Helvetica", 9)
-        canvas.setFillColor(colors.HexColor("#616161"))
-        canvas.drawCentredString(self.width/2, self.height - 60, self.label.upper())
-        
-        # Sublabel
-        if self.sublabel:
-            canvas.setFont("Helvetica", 7)
-            canvas.setFillColor(colors.HexColor("#9E9E9E"))
-            canvas.drawCentredString(self.width/2, self.height - 75, self.sublabel)
-        
-        canvas.restoreState()
-
-# ...existing code...
 
 class UltimatePDFGenerator:
     def __init__(self, reports_dir: str = "reports"):
@@ -523,41 +614,75 @@ class UltimatePDFGenerator:
         }
 
     def _create_header_canvas(self, canvas, doc):
-        """Minimal, modern header in DeepMind style"""
+        """Minimal, modern header with SentryAI branding"""
         canvas.saveState()
         
         page_width = doc.pagesize[0]
-        header_y = doc.pagesize[1] - 60
+        header_y = doc.pagesize[1] - 55
         
-        # Thin accent line at top
+        # Very subtle top line
         canvas.setStrokeColor(self.colors['deepmind_blue'])
-        canvas.setLineWidth(2)
+        canvas.setLineWidth(1.5)
         canvas.line(0, doc.pagesize[1] - 1, page_width, doc.pagesize[1] - 1)
         
         # Logo/Brand mark
         logo_x = 40
         logo_y = header_y
         
-        # Modern circular logo
+        # More refined shield logo
         canvas.setFillColor(self.colors['deepmind_blue'])
-        canvas.circle(logo_x + 12, logo_y + 12, 12, fill=1, stroke=0)
+        shield_path = canvas.beginPath()
+        shield_x = logo_x + 13
+        shield_y = logo_y + 13
+        shield_width = 11
+        shield_height = 15
+        
+        # Shield with smoother curves
+        shield_path.moveTo(shield_x - shield_width, shield_y + shield_height/2)
+        shield_path.lineTo(shield_x - shield_width, shield_y - shield_height/3)
+        shield_path.curveTo(
+            shield_x - shield_width, shield_y - shield_height/2,
+            shield_x - shield_width/2, shield_y - shield_height,
+            shield_x, shield_y - shield_height
+        )
+        shield_path.curveTo(
+            shield_x + shield_width/2, shield_y - shield_height,
+            shield_x + shield_width, shield_y - shield_height/2,
+            shield_x + shield_width, shield_y - shield_height/3
+        )
+        shield_path.lineTo(shield_x + shield_width, shield_y + shield_height/2)
+        shield_path.curveTo(
+            shield_x + shield_width, shield_y + shield_height*0.7,
+            shield_x, shield_y + shield_height,
+            shield_x, shield_y + shield_height
+        )
+        shield_path.curveTo(
+            shield_x, shield_y + shield_height,
+            shield_x - shield_width, shield_y + shield_height*0.7,
+            shield_x - shield_width, shield_y + shield_height/2
+        )
+        shield_path.close()
+        
+        canvas.drawPath(shield_path, fill=1, stroke=0)
+        
+        # "AI" text with better positioning
         canvas.setFillColor(self.colors['white'])
-        canvas.setFont(self.font_display, 11)
-        canvas.drawCentredString(logo_x + 12, logo_y + 7, "AI")
+        canvas.setFont(self.font_display, 10)
+        canvas.drawCentredString(shield_x, shield_y - 4, "AI")
         
-        # Brand text - clean and minimal
-        canvas.setFont(self.font_display, 13)
+        # Brand text with better kerning
+        canvas.setFont(self.font_display, 14)
         canvas.setFillColor(self.colors['deepmind_primary'])
-        canvas.drawString(logo_x + 35, logo_y + 14, "DEEPMIND")
+        canvas.drawString(logo_x + 40, logo_y + 16, "SENTRYAI")
         
-        canvas.setFont(self.font_body, 9)
+        canvas.setFont(self.font_body, 8)
         canvas.setFillColor(self.colors['gray_500'])
-        canvas.drawString(logo_x + 35, logo_y + 2, "Medical Intelligence")
+        canvas.drawString(logo_x + 40, logo_y + 4, "Medical Intelligence Platform")
         
-        # Subtle separator
+        # Minimal separator
         canvas.setStrokeColor(self.colors['gray_200'])
         canvas.setLineWidth(0.5)
-        canvas.line(40, header_y - 10, page_width - 40, header_y - 10)
+        canvas.line(40, header_y - 8, page_width - 40, header_y - 8)
         
         canvas.restoreState()
 
@@ -565,24 +690,31 @@ class UltimatePDFGenerator:
         """Minimal footer with essential information"""
         canvas.saveState()
         
-        footer_y = 35
+        footer_y = 32
         page_width = doc.pagesize[0]
         
         # Top line
         canvas.setStrokeColor(self.colors['gray_200'])
         canvas.setLineWidth(0.5)
-        canvas.line(40, 60, page_width - 40, 60)
+        canvas.line(40, 58, page_width - 40, 58)
         
-        # Footer content
-        canvas.setFont(self.font_body, 8)
+        # Footer content - more spaced
+        canvas.setFont(self.font_body, 7)
         canvas.setFillColor(self.colors['gray_500'])
-        canvas.drawString(40, footer_y + 10, "CONFIDENTIAL MEDICAL ANALYSIS")
-        canvas.drawString(40, footer_y - 2, "For licensed healthcare professionals only")
+        canvas.drawString(40, footer_y + 12, "CONFIDENTIAL MEDICAL ANALYSIS")
         
-        # Page number - modern styling
-        canvas.setFont(self.font_body_bold, 9)
+        canvas.setFont(self.font_body, 7)
+        canvas.setFillColor(self.colors['gray_400'])
+        canvas.drawString(40, footer_y + 2, "For licensed healthcare professionals only • HIPAA Compliant")
+        
+        # Page number with circular background
+        page_text = f"{doc.page}"
+        canvas.setFillColor(self.colors['deepmind_ultra_light'])
+        canvas.circle(page_width - 50, footer_y + 7, 12, fill=1, stroke=0)
+        
+        canvas.setFont(self.font_body_bold, 10)
         canvas.setFillColor(self.colors['deepmind_blue'])
-        canvas.drawRightString(page_width - 40, footer_y + 4, f"{doc.page}")
+        canvas.drawCentredString(page_width - 50, footer_y + 3, page_text)
         
         canvas.restoreState()
 
@@ -592,23 +724,25 @@ class UltimatePDFGenerator:
         
         if is_positive:
             status_text = "ABNORMALITIES DETECTED"
-            status_icon = "●"
+            status_icon = "⚠"
             status_color = self.colors['alert_red']
             bg_color = self.colors['white']
+            border_color = self.colors['alert_red']
         else:
             status_text = "NO SIGNIFICANT ABNORMALITIES"
-            status_icon = "●"
+            status_icon = "✓"
             status_color = self.colors['science_green']
             bg_color = self.colors['white']
+            border_color = self.colors['science_green']
         
         status_style = ParagraphStyle(
             'StatusHeader',
             fontName=self.font_display,
-            fontSize=12,
+            fontSize=13,
             textColor=status_color,
-            leading=16,
+            leading=18,
             alignment=TA_LEFT,
-            spaceAfter=12,
+            spaceAfter=14,
             wordWrap='CJK',
             letterSpacing=0.5
         )
@@ -622,12 +756,12 @@ class UltimatePDFGenerator:
         summary_table = Table(content, colWidths=[6.5*inch])
         summary_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), bg_color),
-            ('BOX', (0, 0), (-1, -1), 1, self.colors['gray_300']),
-            ('LINEABOVE', (0, 0), (-1, 0), 2, status_color),
-            ('TOPPADDING', (0, 0), (-1, -1), 20),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 20),
-            ('LEFTPADDING', (0, 0), (-1, -1), 24),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 24),
+            ('BOX', (0, 0), (-1, -1), 1, self.colors['gray_200']),
+            ('LINEABOVE', (0, 0), (-1, 0), 3, border_color),
+            ('TOPPADDING', (0, 0), (-1, -1), 22),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 22),
+            ('LEFTPADDING', (0, 0), (-1, -1), 28),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 28),
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ]))
         
@@ -766,59 +900,59 @@ class UltimatePDFGenerator:
                             ai_attention_heatmap_image: Image.Image) -> str:
         """Generate a DeepMind-level sophisticated medical report"""
         
-        filename = f"deepmind_medical_report_{analysis_response.analysis_id}.pdf"
+        filename = f"sentryai_medical_report_{analysis_response.analysis_id}.pdf"
         filepath = os.path.join(self.reports_dir, filename)
         
         doc = SimpleDocTemplate(
             filepath,
             pagesize=letter,
             rightMargin=40, leftMargin=40,
-            topMargin=90, bottomMargin=75
+            topMargin=85, bottomMargin=70
         )
         
         story = []
         findings = analysis_response.findings
         
         # === COVER ===
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 35))
         story.append(Paragraph("DIAGNOSTIC IMAGING REPORT", self.styles['hero_title']))
         story.append(Paragraph("Chest Radiography Analysis", self.styles['main_title']))
-        story.append(Spacer(1, 6))
+        story.append(Spacer(1, 8))
         
         story.append(Paragraph(
             "Multi-condition screening for Pneumothorax, Pneumonia, and Tuberculosis using advanced neural networks",
             self.styles['subtitle']
         ))
         
-        story.append(Spacer(1, 40))
+        story.append(Spacer(1, 45))
         
         # === EXECUTIVE SUMMARY ===
         story.append(Paragraph("EXECUTIVE SUMMARY", self.styles['section_header']))
-        story.append(Spacer(1, 12))
+        story.append(Spacer(1, 14))
         story.append(self._create_deepmind_summary_card(findings))
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 35))
         
         # === KEY METRICS - Modern Cards ===
         impression_clean = findings.impression.title().replace('_', ' ')
         
         metric_cards = [
-            DeepMindMetricCard(impression_clean, "Clinical Impression", width=2.2*inch),
-            DeepMindMetricCard(findings.confidence_level, "Peak Confidence", "Model Certainty", width=2.2*inch),
-            DeepMindMetricCard("3", "Conditions", "Screened", width=2.2*inch)
+            DeepMindMetricCard(impression_clean, "Clinical Impression", width=2.1*inch, height=100, icon="🔍"),
+            DeepMindMetricCard(findings.confidence_level, "Peak Confidence", "Model Certainty", width=2.1*inch, height=100, icon="🎯"),
+            DeepMindMetricCard("3", "Conditions", "Screened", width=2.1*inch, height=100, icon="📊")
         ]
         
-        metrics_table = Table([metric_cards], colWidths=[2.2*inch, 2.2*inch, 2.2*inch])
+        metrics_table = Table([metric_cards], colWidths=[2.1*inch, 2.1*inch, 2.1*inch])
         metrics_table.setStyle(TableStyle([
-            ('LEFTPADDING', (0, 0), (-1, -1), 5),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
         ]))
         
         story.append(metrics_table)
-        story.append(Spacer(1, 35))
+        story.append(Spacer(1, 40))
         
         # === CONFIDENCE VISUALIZATION ===
-        story.append(Paragraph("MODEL CONFIDENCE", self.styles['section_header']))
-        story.append(Spacer(1, 15))
+        story.append(Paragraph("MODEL CONFIDENCE ASSESSMENT", self.styles['section_header']))
+        story.append(Spacer(1, 16))
         
         try:
             conf_val = float(findings.confidence_level.rstrip('%'))
@@ -827,24 +961,24 @@ class UltimatePDFGenerator:
         
         gauge = ConfidenceGauge(conf_val)
         story.append(gauge)
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 35))
         
         # === STUDY METADATA ===
         story.append(Paragraph("STUDY INFORMATION", self.styles['section_header']))
-        story.append(Spacer(1, 10))
+        story.append(Spacer(1, 12))
         story.append(self._create_deepmind_metadata(analysis_response))
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 35))
         
         # === AI ANALYSIS ===
         story.append(Paragraph("NEURAL NETWORK ANALYSIS", self.styles['section_header']))
-        story.append(Spacer(1, 8))
+        story.append(Spacer(1, 10))
         
         analysis_text = analysis_response.raw_response.replace('\n\n', '<br/><br/>').replace('\n', '<br/>')
         analysis_table = Table([[Paragraph(analysis_text, self.styles['body'])]], colWidths=[6.5*inch])
         analysis_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), self.colors['white']),
-            ('BOX', (0, 0), (-1, -1), 1, self.colors['gray_300']),
-            ('PADDING', (0, 0), (-1, -1), 20),
+            ('BOX', (0, 0), (-1, -1), 0.5, self.colors['gray_200']),
+            ('PADDING', (0, 0), (-1, -1), 22),
         ]))
         
         story.append(analysis_table)
@@ -852,7 +986,7 @@ class UltimatePDFGenerator:
         
         # === IMAGING ANALYSIS ===
         story.append(Paragraph("IMAGING ANALYSIS", self.styles['section_header']))
-        story.append(Spacer(1, 15))
+        story.append(Spacer(1, 16))
         
         img_max_width = 3 * inch
         rl_original = self._pil_to_reportlab_image(original_image, max_width=img_max_width, enhance=False)
@@ -863,27 +997,27 @@ class UltimatePDFGenerator:
             [Paragraph("Original Image", self.styles['caption']), Paragraph("Neural Attention Heatmap", self.styles['caption'])]
         ]
         
-        image_table = Table(image_data, colWidths=[img_max_width + 0.2*inch, img_max_width + 0.2*inch])
+        image_table = Table(image_data, colWidths=[img_max_width + 0.25*inch, img_max_width + 0.25*inch])
         image_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 8),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('LEFTPADDING', (0, 0), (-1, -1), 10),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 14),
         ]))
         
         story.append(image_table)
-        story.append(Spacer(1, 15))
+        story.append(Spacer(1, 18))
         
         story.append(Paragraph(
-            "<i>Attention heatmap visualizes model focus areas. Warmer colors indicate regions of higher diagnostic relevance.</i>",
+            "<i>Attention heatmap visualizes model focus areas during analysis. Warmer colors (red/yellow) indicate regions of higher diagnostic relevance and algorithmic attention.</i>",
             self.styles['technical']
         ))
-        story.append(Spacer(1, 35))
+        story.append(Spacer(1, 40))
         
         # === RISK ASSESSMENT ===
         story.append(Paragraph("CONDITION ASSESSMENT", self.styles['section_header']))
-        story.append(Spacer(1, 15))
+        story.append(Spacer(1, 16))
         
         # Parse conditions
         abnormality_pattern = re.compile(r"(\w+)\s+\(([\d.]+%)\)")
@@ -893,7 +1027,7 @@ class UltimatePDFGenerator:
         conditions_for_matrix = [(c, detected.get(c, "0%")) for c in all_conditions]
         risk_matrix = RiskMatrix(conditions_for_matrix)
         story.append(risk_matrix)
-        story.append(Spacer(1, 25))
+        story.append(Spacer(1, 28))
         
         # Individual condition cards
         for condition in all_conditions:
@@ -905,45 +1039,46 @@ class UltimatePDFGenerator:
                 confidence = "N/A"
             
             story.append(self._create_deepmind_finding_card(condition, status, confidence))
-            story.append(Spacer(1, 8))
+            story.append(Spacer(1, 10))
         
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 35))
         
         # === CLINICAL RECOMMENDATIONS ===
         story.append(Paragraph("CLINICAL RECOMMENDATIONS", self.styles['section_header']))
-        story.append(Spacer(1, 12))
+        story.append(Spacer(1, 14))
         
         recommendations = [
-            [Paragraph("<b>IMPORTANT NOTICE</b>", ParagraphStyle('Notice', parent=self.styles['body'], fontName=self.font_body_bold, fontSize=10, textColor=self.colors['alert_red'], alignment=TA_CENTER, spaceAfter=10))],
-            [Paragraph("<b>Physician Review Required:</b> This AI analysis is a clinical decision support tool. All findings must be independently verified by a qualified radiologist before clinical action.", self.styles['body'])],
-            [Paragraph("<b>Clinical Correlation:</b> Interpret imaging findings with patient history, examination, and laboratory results.", self.styles['body'])],
-            [Paragraph("<b>Model Limitations:</b> AI models may have limitations with subtle findings or atypical presentations. Clinical judgment supersedes algorithmic output.", self.styles['body'])],
+            [Paragraph("<b>⚠ IMPORTANT NOTICE</b>", ParagraphStyle('Notice', parent=self.styles['body'], fontName=self.font_body_bold, fontSize=11, textColor=self.colors['alert_red'], alignment=TA_CENTER, spaceAfter=12))],
+            [Paragraph("<b>Physician Review Required:</b> This AI analysis serves as a clinical decision support tool. All findings must be independently verified by a qualified radiologist or physician before any clinical action is taken.", self.styles['body'])],
+            [Paragraph("<b>Clinical Correlation:</b> Imaging findings should always be interpreted in conjunction with patient clinical history, physical examination findings, and laboratory results.", self.styles['body'])],
+            [Paragraph("<b>Model Limitations:</b> AI models may have limitations in detecting subtle findings, rare conditions, or atypical presentations. Clinical judgment must always supersede algorithmic output.", self.styles['body'])],
         ]
         
         rec_table = Table(recommendations, colWidths=[6.5*inch])
         rec_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), self.colors['alert_red_light']),
             ('BACKGROUND', (0, 1), (-1, -1), self.colors['white']),
-            ('BOX', (0, 0), (-1, -1), 1, self.colors['gray_300']),
-            ('LINEBELOW', (0, 0), (-1, 0), 1, self.colors['alert_red']),
-            ('PADDING', (0, 0), (-1, -1), 16),
+            ('BOX', (0, 0), (-1, -1), 0.5, self.colors['gray_200']),
+            ('LINEABOVE', (0, 0), (-1, 0), 2, self.colors['alert_red']),
+            ('PADDING', (0, 0), (-1, -1), 18),
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ]))
         
         story.append(rec_table)
-        story.append(Spacer(1, 20))
+        story.append(Spacer(1, 22))
         
         # === ATTESTATION ===
         attestation = (
-            "<b>Report Generation:</b> This report was automatically generated by the DeepMind Medical Intelligence system. "
-            "Analysis based on deep learning trained on large-scale medical datasets. "
-            "System designed to assist, not replace, professional medical judgment."
+            "<b>Report Generation:</b> This report was automatically generated by the SentryAI Medical Intelligence Platform. "
+            "Analysis is based on deep learning algorithms trained on large-scale medical imaging datasets. "
+            "This system is designed to assist, not replace, professional medical judgment. "
+            "Report generated: " + datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')
         )
         story.append(Paragraph(attestation, self.styles['disclaimer']))
         
         doc.build(story, onFirstPage=self._draw_page_template, onLaterPages=self._draw_page_template)
         
-        logger.info(f"Generated DeepMind-style report at: {filepath}")
+        logger.info(f"Generated SentryAI-style report at: {filepath}")
         return filepath
 
     def _draw_page_template(self, canvas, doc):
