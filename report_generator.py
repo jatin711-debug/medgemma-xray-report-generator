@@ -110,9 +110,9 @@ class DeepMindStylePDFGenerator:
     def _setup_fonts(self):
         """Setup a clean, modern typography system using Roboto."""
         try:
-            pdfmetrics.registerFont(TTFont('Roboto', 'assets/Roboto-Regular.ttf'))
-            pdfmetrics.registerFont(TTFont('Roboto-Medium', 'assets/Roboto-Medium.ttf'))
-            pdfmetrics.registerFont(TTFont('Roboto-Light', 'assets/Roboto-Light.ttf'))
+            pdfmetrics.registerFont(TTFont('Roboto', './assets/Roboto-Regular.ttf'))
+            pdfmetrics.registerFont(TTFont('Roboto-Medium', './assets/Roboto-Medium.ttf'))
+            pdfmetrics.registerFont(TTFont('Roboto-Light', './assets/Roboto-Light.ttf'))
             self.font_display = 'Roboto-Light'
             self.font_body = 'Roboto'
             self.font_body_medium = 'Roboto-Medium'
