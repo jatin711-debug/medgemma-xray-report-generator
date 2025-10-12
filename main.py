@@ -40,7 +40,7 @@ from aws_utils import upload_to_s3 # Import the new S3 upload function
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown events."""
     # Startup
-    logger.info("Starting Medical Image Analysis API (Med-GEMMA-3 only)...")
+    logger.info("Starting Medical Image Analysis API (Med-GEMMA-4 only)...")
     global analyzer
     analyzer = MedicalImageAnalyzer()
     await analyzer.load_model()
@@ -50,8 +50,8 @@ async def lifespan(app: FastAPI):
 
 # Initialize FastAPI app with lifespan
 app = FastAPI(
-    title="Medical Image Analysis API (Med-GEMMA-3 only)",
-    description="AI-powered medical image analysis using Med-GEMMA-3",
+    title="Medical Image Analysis API (Med-GEMMA-4 only)",
+    description="AI-powered medical image analysis using Med-GEMMA-4",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -134,17 +134,17 @@ model_loading_error: Optional[str] = None
 
 class MedicalImageAnalyzer:
     """
-    Medical image analysis system using Med-GEMMA-3 for AI-powered radiology insights.
+    Medical image analysis system using Med-GEMMA-4 for AI-powered radiology insights.
     
     This class handles the complete pipeline for medical image analysis including:
     - Model loading and management with CPU/GPU optimization
     - Image preprocessing and validation
-    - AI-powered analysis using Med-GEMMA-3
+    - AI-powered analysis using Med-GEMMA-4
     - PDF report generation
     - Memory management for optimal performance
     
     Attributes:
-        model_id: The Hugging Face model identifier for Med-GEMMA-3
+        model_id: The Hugging Face model identifier for Med-GEMMA-4
         pipeline: The loaded transformers pipeline for image-text-to-text
         reports_dir: Directory for storing generated PDF reports
         max_image_size: Maximum allowed image size in bytes (10MB)
@@ -153,7 +153,7 @@ class MedicalImageAnalyzer:
     """
     
     def __init__(self):
-        # Only one model: Med-GEMMA-3
+        # Only one model: Med-GEMMA-4
         self.model_id = "google/medgemma-4b-it"
         self.processor: Optional[Any] = None
         self.model: Optional[Any] = None
@@ -202,9 +202,9 @@ class MedicalImageAnalyzer:
     
     async def load_model(self) -> None:
         """
-        Load the Med-GEMMA-3 model and processor with memory optimization.
+        Load the Med-GEMMA-4 model and processor with memory optimization.
         
-        This method handles the loading of the Med-GEMMA-3 model and its
+        This method handles the loading of the Med-GEMMA-4 model and its
         associated processor. It includes several optimizations for memory
         management, including:
         - 4-bit quantization to reduce model size
@@ -263,7 +263,7 @@ class MedicalImageAnalyzer:
         This method intelligently extracts the finding and confidence level for pneumothorax.
         
         Args:
-            raw_response: Raw text output from the Med-GEMMA-3 model
+            raw_response: Raw text output from the Med-GEMMA-4 model
               Returns:
             RadiologyFindings: Structured medical findings for pneumothorax.
         """
@@ -1185,7 +1185,7 @@ async def root():
     Returns:
         dict: API status and basic information
     """
-    return {"message": "Medical Image Analysis API (Med-GEMMA-3) is running", "status": "healthy"}
+    return {"message": "Medical Image Analysis API (Med-GEMMA-4) is running", "status": "healthy"}
 
 
 @app.post("/analyze-and-report", response_model=PDFGenerationResponse)
@@ -1262,7 +1262,7 @@ async def list_reports():
 @app.post("/analyze-url", response_model=AnalysisResponse)
 async def analyze_image_url(request: ImageURLRequest):
     """
-    Analyze medical image from HTTP/HTTPS URL using Med-GEMMA-3.
+    Analyze medical image from HTTP/HTTPS URL using Med-GEMMA-4.
     
     Downloads and analyzes medical images from remote URLs with comprehensive
     security validation and error handling.
@@ -1355,7 +1355,7 @@ async def analyze_url_and_generate_report(
 @app.get("/model-status", response_model=ModelStatus)
 async def get_model_status():
     """
-    Get current Med-GEMMA-3 model loading status and system information.
+    Get current Med-GEMMA-4 model loading status and system information.
     
     Provides detailed information about model state, device configuration,
     memory usage, and any loading errors for monitoring and debugging.
@@ -1407,7 +1407,7 @@ async def get_model_status():
 @app.post("/load-model")
 async def force_load_model():
     """
-    Force reload the Med-GEMMA-3 pipeline for recovery from loading failures.
+    Force reload the Med-GEMMA-4 pipeline for recovery from loading failures.
     
     Useful for recovering from initial loading failures or reinitializing
     the model after configuration changes.

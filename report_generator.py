@@ -452,7 +452,7 @@ class UltimatePDFGenerator:
         # Footer text
         canvas.setFont(self.font_body, 9)
         canvas.setFillColor(self.colors['gray_500'])
-        canvas.drawString(40, footer_y + 20, "Med-GEMMA-3 Neural Diagnostic Engine")
+        canvas.drawString(40, footer_y + 20, "Med-GEMMA-4 Neural Diagnostic Engine")
         canvas.drawString(40, footer_y + 8, "⚡ Confidential Medical Analysis • For Licensed Healthcare Professionals Only")
         
         # Page number with style
@@ -541,7 +541,7 @@ class UltimatePDFGenerator:
             ('📁', 'Image Source', source),
             ('📐', 'Dimensions', f"{dimensions[0]} × {dimensions[1]} pixels"),
             ('💾', 'Processing', "Neural Network Analysis Complete"),
-            ('🎯', 'Model Version', "Med-GEMMA-3.1 (Build 2024.06)")
+            ('🎯', 'Model Version', "Med-GEMMA-4.1 (Build 2024.06)")
         ]
         
         styled_rows = []
