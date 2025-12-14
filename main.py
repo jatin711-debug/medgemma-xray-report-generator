@@ -1177,7 +1177,7 @@ class MedicalImageAnalyzer:
 # Initialize analyzer
 analyzer = MedicalImageAnalyzer()
 # Initialize database
-initialize_database()
+# initialize_database()
 
 
 @app.get("/")
@@ -1344,32 +1344,19 @@ Support devices detected: {', '.join(consensus.nv_reason_devices) if consensus.n
         heatmap  # This is now from NV-Reason-CXR (primary) or fallback
     )
     
-    # S3 upload
-    s3_bucket_name = os.getenv("AWS_S3_BUCKET_NAME", "your-s3-bucket-name")
-    s3_region = os.getenv("AWS_REGION", "your-aws-region")
-    s3_key = f"reports/{multi_response.analysis_id}/{os.path.basename(local_pdf_path)}"
+    # LOCAL TESTING MODE: Skip S3 upload and database storage
+    # PDF is saved locally in reports/ directory
+    logger.info(f"PDF report generated locally: {local_pdf_path}")
     
-    s3_pdf_url = ""
-    try:
-        s3_pdf_url = await upload_to_s3(
-            local_file_path=local_pdf_path,
-            bucket_name=s3_bucket_name,
-            s3_key=s3_key,
-            region_name=s3_region
-        )
-        logger.info(f"Successfully uploaded PDF to S3: {s3_pdf_url}")
-    except Exception as e:
-        logger.error(f"Failed to upload PDF to S3: {e}", exc_info=True)
-
-    path_to_store = s3_key
-    
-    await store_analysis_result(
-        image_uuid=request.image_uuid,
-        reportPath=path_to_store
-    )
+    # TODO: Re-enable for production
+    # s3_bucket_name = os.getenv("AWS_S3_BUCKET_NAME", "your-s3-bucket-name")
+    # s3_region = os.getenv("AWS_REGION", "your-aws-region")
+    # s3_key = f"reports/{multi_response.analysis_id}/{os.path.basename(local_pdf_path)}"
+    # s3_pdf_url = await upload_to_s3(...)
+    # await store_analysis_result(image_uuid=request.image_uuid, reportPath=s3_key)
     
     return PDFGenerationResponse(
-        pdf_path=path_to_store,
+        pdf_path=local_pdf_path,  # Return local path for testing
         analysis_id=multi_response.analysis_id
     )
 
