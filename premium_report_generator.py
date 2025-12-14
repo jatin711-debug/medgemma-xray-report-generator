@@ -255,14 +255,11 @@ class PremiumReportGenerator:
         story.append(Paragraph("DETECTION RESULTS", self.styles['section']))
         story.append(Spacer(1, 6))
         
-        # Conditions to check
+        # Only show these 3 conditions (restricted scope)
         conditions = [
             ('Pneumothorax', 'pneumothorax'),
             ('Pneumonia', 'pneumonia'),
             ('Tuberculosis (TB)', 'tb'),
-            ('Consolidation', 'consolidation'),
-            ('Effusion', 'effusion'),
-            ('Cardiomegaly', 'cardiomegaly'),
         ]
         
         # Header row

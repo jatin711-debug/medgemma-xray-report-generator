@@ -188,10 +188,13 @@ class MultiModelAnalyzer:
             nv_findings=nv_findings
         )
         
-        # Select primary heatmap (NV-Reason preferred)
-        if nv_success and nv_heatmap is not None:
+        # Generate zone-based heatmap from parsed locations (preferred)
+        if nv_success and nv_findings and nv_findings.locations:
+            primary_heatmap = self.nv_reason.generate_zone_heatmap(nv_findings.locations, image)
+            logger.info(f"Using zone-based heatmap from {len(nv_findings.locations)} locations")
+        elif nv_success and nv_heatmap is not None:
             primary_heatmap = nv_heatmap
-            logger.info("Using NV-Reason-CXR heatmap (primary)")
+            logger.info("Using NV-Reason-CXR attention heatmap (fallback)")
         elif medgemma_success and medgemma_heatmap is not None:
             primary_heatmap = medgemma_heatmap
             logger.info("Using MedGemma heatmap (fallback)")

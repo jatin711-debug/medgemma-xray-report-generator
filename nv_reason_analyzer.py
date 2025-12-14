@@ -34,7 +34,52 @@ class NVReasonFindings(BaseModel):
     answer: str = Field(default="", description="Final diagnosis/answer")
     abnormalities: list[str] = Field(default_factory=list, description="Detected abnormalities")
     support_devices: list[str] = Field(default_factory=list, description="Detected support devices (tubes, lines, etc.)")
+    locations: list[str] = Field(default_factory=list, description="Anatomical locations of findings")
     raw_response: str = Field(default="", description="Complete raw model response")
+
+
+# Anatomical zone coordinates (normalized 0-1 for chest X-ray)
+# Based on standard PA chest X-ray anatomy
+ANATOMICAL_ZONES = {
+    # Right lung (left side of image in PA view)
+    "right upper": (0.05, 0.15, 0.45, 0.40),
+    "right middle": (0.05, 0.35, 0.45, 0.55),
+    "right lower": (0.05, 0.50, 0.45, 0.80),
+    "right lung": (0.05, 0.15, 0.45, 0.80),
+    "right hilum": (0.30, 0.30, 0.48, 0.50),
+    "right costophrenic": (0.05, 0.70, 0.30, 0.85),
+    
+    # Left lung (right side of image in PA view)
+    "left upper": (0.55, 0.15, 0.95, 0.40),
+    "left middle": (0.55, 0.35, 0.95, 0.55),
+    "left lower": (0.55, 0.50, 0.95, 0.80),
+    "left lung": (0.55, 0.15, 0.95, 0.80),
+    "left hilum": (0.52, 0.30, 0.70, 0.50),
+    "left costophrenic": (0.70, 0.70, 0.95, 0.85),
+    
+    # Central structures
+    "cardiac": (0.30, 0.35, 0.70, 0.75),
+    "heart": (0.30, 0.35, 0.70, 0.75),
+    "cardiomegaly": (0.25, 0.30, 0.75, 0.80),
+    "mediastinum": (0.35, 0.10, 0.65, 0.45),
+    "mediastinal": (0.35, 0.10, 0.65, 0.45),
+    "hilar": (0.30, 0.30, 0.70, 0.50),
+    "bilateral hilar": (0.30, 0.30, 0.70, 0.50),
+    "trachea": (0.42, 0.05, 0.58, 0.25),
+    
+    # Apices
+    "apex": (0.20, 0.08, 0.80, 0.25),
+    "apical": (0.20, 0.08, 0.80, 0.25),
+    "right apex": (0.15, 0.08, 0.45, 0.25),
+    "left apex": (0.55, 0.08, 0.85, 0.25),
+    
+    # General zones
+    "upper": (0.10, 0.10, 0.90, 0.40),
+    "lower": (0.10, 0.50, 0.90, 0.85),
+    "bilateral": (0.05, 0.15, 0.95, 0.80),
+    "diffuse": (0.05, 0.10, 0.95, 0.85),
+    "perihilar": (0.25, 0.25, 0.75, 0.55),
+}
 
 
 class NVReasonCXRAnalyzer:
@@ -44,7 +89,7 @@ class NVReasonCXRAnalyzer:
     This class handles:
     - Model loading with GPU optimization
     - Structured inference with thinking/answer parsing
-    - Attention-based heatmap generation for abnormality localization
+    - Zone-based heatmap generation from anatomical locations
     
     The model is based on Qwen2.5-VL-3B and provides step-by-step medical reasoning.
     """
@@ -166,21 +211,26 @@ class NVReasonCXRAnalyzer:
                 else:
                     answer = raw_response
             
-            # Parse abnormalities from answer
-            abnormality_keywords = [
-                'pneumothorax', 'pneumonia', 'tuberculosis', 'tb', 'consolidation',
-                'effusion', 'cardiomegaly', 'atelectasis', 'nodule', 'mass',
-                'opacity', 'infiltrate', 'edema', 'fracture', 'lesion'
-            ]
+            # Only detect these 3 conditions
+            abnormality_keywords = ['pneumothorax', 'pneumonia', 'tuberculosis', 'tb']
             
             answer_lower = answer.lower()
+            raw_lower = raw_response.lower()
+            
             for keyword in abnormality_keywords:
-                if keyword in answer_lower:
-                    # Check if it's a positive finding (not "no pneumothorax")
-                    # Look for negation patterns
-                    negation_pattern = rf'(no|without|absence of|normal|negative for)\s+\w*\s*{keyword}'
-                    if not re.search(negation_pattern, answer_lower):
-                        abnormalities.append(keyword.title())
+                # Check if detected (look for "DETECTED" pattern or presence without negation)
+                detected_pattern = rf'{keyword}[:\s]*detected'
+                negation_pattern = rf'(no|without|absence of|normal|negative for|not detected)\s*\w*\s*{keyword}'
+                
+                # Check in both answer and raw response
+                text_to_check = answer_lower + " " + raw_lower
+                
+                if re.search(detected_pattern, text_to_check, re.IGNORECASE):
+                    # Explicit DETECTED marker
+                    abnormalities.append('TB' if keyword in ['tuberculosis', 'tb'] else keyword.title())
+                elif keyword in text_to_check and not re.search(negation_pattern, text_to_check):
+                    # Present without negation
+                    abnormalities.append('TB' if keyword in ['tuberculosis', 'tb'] else keyword.title())
             
             # Parse support devices
             device_keywords = [
@@ -193,6 +243,23 @@ class NVReasonCXRAnalyzer:
                 if keyword in answer_lower:
                     support_devices.append(keyword.upper() if len(keyword) <= 4 else keyword.title())
             
+            # Parse anatomical locations from response
+            locations = []
+            for zone_name in ANATOMICAL_ZONES.keys():
+                if zone_name in answer_lower or zone_name in raw_response.lower():
+                    locations.append(zone_name)
+            
+            # Also look for LOCATION: patterns from our prompt format
+            location_matches = re.findall(r'LOCATION:\s*([^|]+)', raw_response, re.IGNORECASE)
+            for loc in location_matches:
+                loc_clean = loc.strip().lower()
+                for zone_name in ANATOMICAL_ZONES.keys():
+                    if zone_name in loc_clean:
+                        if zone_name not in locations:
+                            locations.append(zone_name)
+            
+            logger.info(f"Parsed locations: {locations}")
+            
         except Exception as e:
             logger.error(f"Error parsing NV-Reason structured response: {e}")
             answer = raw_response
@@ -202,6 +269,7 @@ class NVReasonCXRAnalyzer:
             answer=answer,
             abnormalities=list(set(abnormalities)),  # Remove duplicates
             support_devices=list(set(support_devices)),
+            locations=list(set(locations)),
             raw_response=raw_response
         )
     
@@ -215,13 +283,30 @@ class NVReasonCXRAnalyzer:
         await self.load_model()
         
         try:
-            # Prepare input with clinical prompt
+            # Prepare input with focused prompt for 3 conditions only
+            prompt_text = """Analyze this chest X-ray for ONLY these 3 conditions:
+1. Pneumothorax
+2. Pneumonia  
+3. Tuberculosis (TB)
+
+For each condition, state:
+- Whether it is DETECTED or NOT DETECTED
+- If detected, describe the LOCATION (e.g., "right upper lobe", "left lower zone", "bilateral")
+- Confidence level: HIGH, MEDIUM, or LOW
+
+Format:
+PNEUMOTHORAX: [DETECTED/NOT DETECTED] | LOCATION: [location if detected] | CONFIDENCE: [level]
+PNEUMONIA: [DETECTED/NOT DETECTED] | LOCATION: [location if detected] | CONFIDENCE: [level]
+TUBERCULOSIS: [DETECTED/NOT DETECTED] | LOCATION: [location if detected] | CONFIDENCE: [level]
+
+Be conservative - only mark as DETECTED if you have clear evidence."""
+
             messages = [
                 {
                     "role": "user",
                     "content": [
                         {"type": "image", "image": image},
-                        {"type": "text", "text": "Find abnormalities and support devices. Provide detailed analysis."}
+                        {"type": "text", "text": prompt_text}
                     ]
                 }
             ]
@@ -448,6 +533,82 @@ class NVReasonCXRAnalyzer:
             
         except Exception as e:
             logger.error(f"Error creating heatmap overlay: {e}")
+            return self._create_placeholder_heatmap(original_image)
+    
+    def generate_zone_heatmap(self, locations: list[str], original_image: Image.Image) -> Image.Image:
+        """
+        Generate heatmap based on parsed anatomical locations.
+        Maps location names to predefined zones and highlights those regions.
+        
+        Args:
+            locations: List of anatomical location strings (e.g., ["right upper", "cardiac"])
+            original_image: Original X-ray image
+            
+        Returns:
+            Image with highlighted zones overlay
+        """
+        try:
+            width, height = original_image.size
+            
+            # Create empty heatmap
+            heatmap = np.zeros((height, width), dtype=np.float32)
+            
+            # Add zones for each detected location
+            for location in locations:
+                location_lower = location.lower()
+                
+                # Find matching zone
+                for zone_name, (x1, y1, x2, y2) in ANATOMICAL_ZONES.items():
+                    if zone_name in location_lower or location_lower in zone_name:
+                        # Convert normalized coords to pixels
+                        px1 = int(x1 * width)
+                        py1 = int(y1 * height)
+                        px2 = int(x2 * width)
+                        py2 = int(y2 * height)
+                        
+                        # Create elliptical highlight (more natural than rectangle)
+                        cy, cx = (py1 + py2) // 2, (px1 + px2) // 2
+                        ry, rx = (py2 - py1) // 2, (px2 - px1) // 2
+                        
+                        y_coords, x_coords = np.ogrid[:height, :width]
+                        ellipse_mask = ((x_coords - cx) / max(rx, 1))**2 + ((y_coords - cy) / max(ry, 1))**2 <= 1
+                        
+                        # Add to heatmap with gaussian falloff
+                        gaussian = np.exp(-2 * (((x_coords - cx) / max(rx, 1))**2 + ((y_coords - cy) / max(ry, 1))**2))
+                        heatmap += gaussian * ellipse_mask
+                        
+                        logger.info(f"Added zone '{zone_name}' at ({px1},{py1})-({px2},{py2})")
+                        break
+            
+            # Normalize heatmap
+            if heatmap.max() > 0:
+                heatmap = heatmap / heatmap.max()
+            else:
+                logger.warning("No zones matched, returning placeholder")
+                return self._create_placeholder_heatmap(original_image)
+            
+            # Apply gaussian blur for smooth edges
+            heatmap_blurred = cv2.GaussianBlur(heatmap, (31, 31), 0)
+            
+            # Apply colormap (red for high attention)
+            heatmap_colored = cv2.applyColorMap(
+                np.uint8(255 * heatmap_blurred), 
+                cv2.COLORMAP_JET
+            )
+            heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+            
+            # Blend with original
+            original_rgb = np.array(original_image.convert("RGB"))
+            alpha = 0.5  # 50% overlay
+            blended = ((1 - alpha * heatmap_blurred[..., np.newaxis]) * original_rgb + 
+                       (alpha * heatmap_blurred[..., np.newaxis]) * heatmap_colored)
+            blended = np.clip(blended, 0, 255).astype(np.uint8)
+            
+            logger.info(f"Generated zone-based heatmap for {len(locations)} locations")
+            return Image.fromarray(blended)
+            
+        except Exception as e:
+            logger.error(f"Error generating zone heatmap: {e}", exc_info=True)
             return self._create_placeholder_heatmap(original_image)
     
     def _create_placeholder_heatmap(self, original_image: Image.Image) -> Image.Image:
