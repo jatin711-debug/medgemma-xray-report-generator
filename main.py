@@ -1306,26 +1306,30 @@ async def analyze_url_and_generate_report(
             self.image_metadata = image_metadata
     
     # Build combined raw response including NV-Reason thinking chain
-    combined_raw = f"""=== MULTI-MODEL ANALYSIS ===
+    # Truncate long text to fit on PDF page (max ~1500 chars per section)
+    MAX_SECTION_LEN = 1000
+    
+    def truncate(text, max_len=MAX_SECTION_LEN):
+        if not text:
+            return 'Not available'
+        if len(text) > max_len:
+            return text[:max_len] + '... [truncated]'
+        return text
+    
+    combined_raw = f"""=== MULTI-MODEL CONSENSUS ===
 
---- MedGemma-4B-IT Analysis ---
-{consensus.medgemma_raw if consensus.medgemma_raw else 'Not available'}
+Clinical Impression: {consensus.clinical_impression}
 
---- NV-Reason-CXR-3B Reasoning ---
-<thinking>
-{consensus.nv_reason_thinking if consensus.nv_reason_thinking else 'Not available'}
-</thinking>
+Consensus Level: {consensus.consensus_level.upper()}
+Abnormalities (agreed by both): {', '.join(consensus.consensus_abnormalities) if consensus.consensus_abnormalities else 'None'}
+All Detected: {', '.join(consensus.all_abnormalities) if consensus.all_abnormalities else 'None'}
+Support Devices: {', '.join(consensus.nv_reason_devices) if consensus.nv_reason_devices else 'None'}
 
-<answer>
-{consensus.nv_reason_answer if consensus.nv_reason_answer else 'Not available'}
-</answer>
+--- NV-Reason-CXR-3B Answer ---
+{truncate(consensus.nv_reason_answer, 1500)}
 
---- CONSENSUS ({consensus.consensus_level.upper()}) ---
-{consensus.clinical_impression}
-
-Abnormalities agreed by both models: {', '.join(consensus.consensus_abnormalities) if consensus.consensus_abnormalities else 'None'}
-All detected abnormalities: {', '.join(consensus.all_abnormalities) if consensus.all_abnormalities else 'None'}
-Support devices detected: {', '.join(consensus.nv_reason_devices) if consensus.nv_reason_devices else 'None'}
+--- MedGemma-4B-IT Summary ---
+{truncate(consensus.medgemma_raw, 800)}
 """
     
     adapter_response = PDFAdapterResponse(
