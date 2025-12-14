@@ -1305,7 +1305,7 @@ async def analyze_url_and_generate_report(
             self.raw_response = raw_response
             self.image_metadata = image_metadata
     
-    # Build full consensus data for premium report (NO truncation)
+    # Build full consensus data for premium report
     consensus_data = {
         'medgemma_raw': consensus.medgemma_raw,
         'nv_reason_thinking': consensus.nv_reason_thinking,
@@ -1313,6 +1313,8 @@ async def analyze_url_and_generate_report(
         'consensus_level': consensus.consensus_level,
         'clinical_impression': consensus.clinical_impression,
         'all_abnormalities': consensus.all_abnormalities,
+        'medgemma_abnormalities': consensus.medgemma_abnormalities,
+        'nv_reason_abnormalities': consensus.nv_reason_abnormalities,
         'nv_reason_devices': consensus.nv_reason_devices,
     }
     
