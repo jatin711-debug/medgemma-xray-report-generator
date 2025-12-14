@@ -418,11 +418,15 @@ class NVReasonCXRAnalyzer:
                 0
             )
             
-            # Apply threshold to focus on high-attention areas
-            threshold = np.percentile(heatmap_blurred, self._HEATMAP_THRESHOLD_PERCENTILE)
-            heatmap_focused = np.clip(heatmap_blurred - threshold, 0, None)
-            if heatmap_focused.max() > 0:
-                heatmap_focused = heatmap_focused / heatmap_focused.max()
+            # Normalize to full 0-1 range for better visibility
+            if heatmap_blurred.max() > heatmap_blurred.min():
+                heatmap_normalized = (heatmap_blurred - heatmap_blurred.min()) / (heatmap_blurred.max() - heatmap_blurred.min())
+            else:
+                heatmap_normalized = np.zeros_like(heatmap_blurred)
+            
+            # Apply lower threshold (50th percentile) and boost contrast
+            threshold = np.percentile(heatmap_normalized, 50)
+            heatmap_focused = np.clip((heatmap_normalized - threshold) * 2, 0, 1)
             
             # Convert to colormap (JET colormap gives red for high attention)
             heatmap_colored = cv2.applyColorMap(
@@ -434,13 +438,12 @@ class NVReasonCXRAnalyzer:
             # Convert original image to RGB array
             original_rgb = np.array(original_image.convert("RGB"))
             
-            # Blend heatmap with original
-            alpha = self._HEATMAP_OVERLAY_ALPHA
-            # Only blend where heatmap is significant
-            mask = heatmap_focused[..., np.newaxis]
-            blended = (1 - mask * alpha) * original_rgb + (mask * alpha) * heatmap_colored
+            # Blend heatmap with original using fixed alpha (not mask-weighted)
+            alpha = 0.4  # Fixed alpha for consistent visibility
+            blended = (1 - alpha) * original_rgb + alpha * heatmap_colored
             blended = np.clip(blended, 0, 255).astype(np.uint8)
             
+            logger.info(f"Created visible heatmap overlay with alpha={alpha}")
             return Image.fromarray(blended)
             
         except Exception as e:
