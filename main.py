@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, HttpUrl
 from PIL import Image
-from report_generator import UltimatePDFGenerator
+from premium_report_generator import PremiumReportGenerator
 import gc
 import torch
 from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
@@ -1305,47 +1305,35 @@ async def analyze_url_and_generate_report(
             self.raw_response = raw_response
             self.image_metadata = image_metadata
     
-    # Build combined raw response including NV-Reason thinking chain
-    # Truncate long text to fit on PDF page (max ~1500 chars per section)
-    MAX_SECTION_LEN = 1000
+    # Build full consensus data for premium report (NO truncation)
+    consensus_data = {
+        'medgemma_raw': consensus.medgemma_raw,
+        'nv_reason_thinking': consensus.nv_reason_thinking,
+        'nv_reason_answer': consensus.nv_reason_answer,
+        'consensus_level': consensus.consensus_level,
+        'clinical_impression': consensus.clinical_impression,
+        'all_abnormalities': consensus.all_abnormalities,
+        'nv_reason_devices': consensus.nv_reason_devices,
+    }
     
-    def truncate(text, max_len=MAX_SECTION_LEN):
-        if not text:
-            return 'Not available'
-        if len(text) > max_len:
-            return text[:max_len] + '... [truncated]'
-        return text
-    
-    combined_raw = f"""=== MULTI-MODEL CONSENSUS ===
-
-Clinical Impression: {consensus.clinical_impression}
-
-Consensus Level: {consensus.consensus_level.upper()}
-Abnormalities (agreed by both): {', '.join(consensus.consensus_abnormalities) if consensus.consensus_abnormalities else 'None'}
-All Detected: {', '.join(consensus.all_abnormalities) if consensus.all_abnormalities else 'None'}
-Support Devices: {', '.join(consensus.nv_reason_devices) if consensus.nv_reason_devices else 'None'}
-
---- NV-Reason-CXR-3B Answer ---
-{truncate(consensus.nv_reason_answer, 1500)}
-
---- MedGemma-4B-IT Summary ---
-{truncate(consensus.medgemma_raw, 800)}
-"""
+    # Initialize premium report generator
+    pdf_generator = PremiumReportGenerator()
     
     adapter_response = PDFAdapterResponse(
         analysis_id=multi_response.analysis_id,
         timestamp=multi_response.timestamp,
         findings=adapter_findings,
-        raw_response=combined_raw,
+        raw_response=consensus.medgemma_raw,  # For backwards compat
         image_metadata=multi_response.image_metadata
     )
     
-    # Generate PDF with multi-model heatmap (from NV-Reason-CXR)
+    # Generate premium PDF with full multi-model data
     local_pdf_path = await run_in_threadpool(
-        pdf_generator.generate_pdf_report, 
+        pdf_generator.generate_report,  # New method name
         adapter_response,
         original_image,
-        heatmap  # This is now from NV-Reason-CXR (primary) or fallback
+        heatmap,
+        consensus_data  # Pass full consensus data
     )
     
     # LOCAL TESTING MODE: Skip S3 upload and database storage
