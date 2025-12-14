@@ -342,9 +342,15 @@ class MultiModelAnalyzer:
         import io
         import aiohttp
         
+        # Headers to avoid 403 errors from Wikipedia and other sites
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "image/*,*/*"
+        }
+        
         # Download image
         async with aiohttp.ClientSession() as session:
-            async with session.get(str(image_url), timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            async with session.get(str(image_url), headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 if resp.status != 200:
                     from fastapi import HTTPException
                     raise HTTPException(status_code=400, detail=f"Failed to fetch image: HTTP {resp.status}")
