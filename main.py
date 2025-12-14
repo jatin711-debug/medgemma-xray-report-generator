@@ -30,29 +30,41 @@ from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndByte
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Global analyzer instance
-analyzer = None
+# Global analyzer instances
+analyzer = None  # MedGemma analyzer (legacy)
+multi_analyzer = None  # Multi-model analyzer (primary)
 
 from db import initialize_database, store_analysis_result
 from aws_utils import upload_to_s3 # Import the new S3 upload function
+from multi_model_analyzer import MultiModelAnalyzer, ConsensusFindings, MultiModelAnalysisResponse
+from nv_reason_analyzer import NVReasonFindings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown events."""
     # Startup
-    logger.info("Starting Medical Image Analysis API (Med-GEMMA-3 only)...")
-    global analyzer
+    logger.info("Starting Medical Image Analysis API (Multi-Model: MedGemma + NV-Reason-CXR)...")
+    global analyzer, multi_analyzer
+    
+    # Initialize MedGemma analyzer
     analyzer = MedicalImageAnalyzer()
     await analyzer.load_model()
+    
+    # Initialize Multi-Model analyzer (uses NV-Reason-CXR for heatmaps)
+    multi_analyzer = MultiModelAnalyzer()
+    multi_analyzer.set_medgemma_analyzer(analyzer)  # Share MedGemma instance
+    await multi_analyzer.load_models()
+    
+    logger.info("All models loaded successfully!")
     yield
     # Shutdown - cleanup if needed
     logger.info("Shutting down Medical Image Analysis API...")
 
 # Initialize FastAPI app with lifespan
 app = FastAPI(
-    title="Medical Image Analysis API (Med-GEMMA-3 only)",
-    description="AI-powered medical image analysis using Med-GEMMA-3",
-    version="1.0.0",
+    title="Medical Image Analysis API (Multi-Model)",
+    description="AI-powered medical image analysis using MedGemma-4B-IT and NV-Reason-CXR-3B with consensus-based findings",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -1255,43 +1267,90 @@ async def analyze_url_and_generate_report(
     request: ImageURLReportRequest
 ):
     """
-    Analyze medical image from URL and generate comprehensive PDF report.
+    Analyze medical image from URL using MULTI-MODEL analysis and generate PDF report.
     
-    Combines secure image downloading, AI analysis, professional PDF
-    report generation, S3 upload, and database logging.
+    Uses both MedGemma-4B-IT and NV-Reason-CXR-3B for consensus-based findings.
+    Heatmaps are generated from NV-Reason-CXR attention weights (more reliable).
     
     Args:
-        request: ImageURLReportRequest containing the image URL
+        request: ImageURLReportRequest containing the image URL and UUID
         
     Returns:
         PDFGenerationResponse: PDF file S3 path and analysis identifier
-        
-    Performance Optimization:
-        - Uses thread pool for CPU-intensive PDF generation
-        - Efficient async image downloading
-        - Memory-conscious processing pipeline
-        - Single AI inference run (no duplicate processing)
     """
-    # Perform analysis once - this includes heatmap generation
-    analysis_response, original_image, heatmap_image  = await analyzer.analyze_image_from_url(str(request.image_url))
+    # Perform MULTI-MODEL analysis - uses both MedGemma and NV-Reason-CXR
+    multi_response, original_image, heatmap, saliency, probability, segmentation = \
+        await multi_analyzer.analyze_image_from_url(str(request.image_url))
     
-    # Generate PDF in thread pool to avoid blocking the event loop
-    local_pdf_path = await run_in_threadpool(
-        pdf_generator.generate_pdf_report, 
-        analysis_response,
-        original_image,
-        heatmap_image
+    # Create adapter response for PDF generator (expects AnalysisResponse format)
+    # Map consensus findings to RadiologyFindings format
+    consensus = multi_response.consensus
+    adapter_findings = RadiologyFindings(
+        anatomical_structures=["Lungs", "Heart", "Mediastinum", "Pleura"],
+        abnormalities=consensus.all_abnormalities if consensus.all_abnormalities else ["No significant abnormalities detected"],
+        impression=consensus.clinical_impression,
+        recommendations=[
+            "Clinical correlation recommended",
+            "Specialist review if symptoms persist"
+        ] + (["NV-Reason reasoning available in full report"] if consensus.nv_reason_thinking else []),
+        confidence_level=f"{consensus.consensus_level.upper()} (Multi-Model)"
     )
     
-    # Define S3 bucket details (replace with your actual configuration)
+    # Create adapter response object for PDF generator
+    class PDFAdapterResponse:
+        def __init__(self, analysis_id, timestamp, findings, raw_response, image_metadata):
+            self.analysis_id = analysis_id
+            self.timestamp = timestamp
+            self.findings = findings
+            self.raw_response = raw_response
+            self.image_metadata = image_metadata
+    
+    # Build combined raw response including NV-Reason thinking chain
+    combined_raw = f"""=== MULTI-MODEL ANALYSIS ===
+
+--- MedGemma-4B-IT Analysis ---
+{consensus.medgemma_raw if consensus.medgemma_raw else 'Not available'}
+
+--- NV-Reason-CXR-3B Reasoning ---
+<thinking>
+{consensus.nv_reason_thinking if consensus.nv_reason_thinking else 'Not available'}
+</thinking>
+
+<answer>
+{consensus.nv_reason_answer if consensus.nv_reason_answer else 'Not available'}
+</answer>
+
+--- CONSENSUS ({consensus.consensus_level.upper()}) ---
+{consensus.clinical_impression}
+
+Abnormalities agreed by both models: {', '.join(consensus.consensus_abnormalities) if consensus.consensus_abnormalities else 'None'}
+All detected abnormalities: {', '.join(consensus.all_abnormalities) if consensus.all_abnormalities else 'None'}
+Support devices detected: {', '.join(consensus.nv_reason_devices) if consensus.nv_reason_devices else 'None'}
+"""
+    
+    adapter_response = PDFAdapterResponse(
+        analysis_id=multi_response.analysis_id,
+        timestamp=multi_response.timestamp,
+        findings=adapter_findings,
+        raw_response=combined_raw,
+        image_metadata=multi_response.image_metadata
+    )
+    
+    # Generate PDF with multi-model heatmap (from NV-Reason-CXR)
+    local_pdf_path = await run_in_threadpool(
+        pdf_generator.generate_pdf_report, 
+        adapter_response,
+        original_image,
+        heatmap  # This is now from NV-Reason-CXR (primary) or fallback
+    )
+    
+    # S3 upload
     s3_bucket_name = os.getenv("AWS_S3_BUCKET_NAME", "your-s3-bucket-name")
     s3_region = os.getenv("AWS_REGION", "your-aws-region")
-    # Create a unique S3 key, e.g., using the analysis ID
-    s3_key = f"reports/{analysis_response.analysis_id}/{os.path.basename(local_pdf_path)}"
+    s3_key = f"reports/{multi_response.analysis_id}/{os.path.basename(local_pdf_path)}"
     
-    s3_pdf_url = ""  # Initialize to empty string
+    s3_pdf_url = ""
     try:
-        # Upload the PDF to S3
         s3_pdf_url = await upload_to_s3(
             local_file_path=local_pdf_path,
             bucket_name=s3_bucket_name,
@@ -1305,66 +1364,52 @@ async def analyze_url_and_generate_report(
     path_to_store = s3_key
     
     await store_analysis_result(
-        image_uuid=request.image_uuid,  # Ensure ImageURLReportRequest has image_uuid
+        image_uuid=request.image_uuid,
         reportPath=path_to_store
     )
     
     return PDFGenerationResponse(
-        pdf_path=path_to_store,  # Return S3 URL or local path
-        analysis_id=analysis_response.analysis_id
+        pdf_path=path_to_store,
+        analysis_id=multi_response.analysis_id
     )
 
 
-@app.get("/model-status", response_model=ModelStatus)
+@app.get("/model-status")
 async def get_model_status():
     """
-    Get current Med-GEMMA-3 model loading status and system information.
+    Get status of BOTH models (MedGemma and NV-Reason-CXR).
     
-    Provides detailed information about model state, device configuration,
+    Returns detailed information about model states, device configuration,
     memory usage, and any loading errors for monitoring and debugging.
-    
-    Returns:
-        ModelStatus: Model state, device info, memory usage, and error details
-        
-    Monitoring Features:
-        - Model loading state
-        - GPU/CPU device information
-        - Memory usage statistics
-        - Error tracking and reporting
     """
     global model_loading_error
     
-    try:
-        if analyzer.model is not None and model_loading_error is None:
-            device_str = "cuda" if torch.cuda.is_available() else "cpu"
-            memory_info = analyzer.get_system_memory_info()
-            return ModelStatus(
-                loaded=True,
-                device=device_str,
-                memory_usage=memory_info,
-                error=None
-            )
-        elif model_loading_error is not None:
-            return ModelStatus(
-                loaded=False,
-                device="unknown",
-                memory_usage=analyzer.get_system_memory_info(),
-                error=model_loading_error
-            )
-        else:
-            return ModelStatus(
-                loaded=False,
-                device="unknown",
-                memory_usage=analyzer.get_system_memory_info(),
-                error="Model not yet loaded"
-            )
-    except Exception as e:
-        return ModelStatus(
-            loaded=False,
-            device="unknown",
-            memory_usage="unavailable",
-            error=str(e)
-        )
+    device_str = "cuda" if torch.cuda.is_available() else "cpu"
+    memory_info = analyzer.get_system_memory_info() if analyzer else "unavailable"
+    
+    # Get status of both models
+    multi_status = multi_analyzer.get_model_status() if multi_analyzer else {
+        "medgemma": {"loaded": False},
+        "nv_reason": {"loaded": False}
+    }
+    
+    return {
+        "mode": "multi-model",
+        "device": device_str,
+        "memory_usage": memory_info,
+        "models": {
+            "medgemma": {
+                "loaded": analyzer.model_loaded if analyzer else False,
+                "model_id": analyzer.model_id if analyzer else "not initialized"
+            },
+            "nv_reason_cxr": multi_status.get("nv_reason", {"loaded": False}),
+        },
+        "all_models_loaded": (
+            (analyzer.model_loaded if analyzer else False) and 
+            multi_status.get("nv_reason", {}).get("loaded", False)
+        ),
+        "error": model_loading_error
+    }
 
 
 @app.post("/load-model")

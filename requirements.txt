@@ -4,7 +4,7 @@ python-multipart
 pydantic
 pydantic-settings
 torch
-transformers
+transformers>=4.56.0
 accelerate
 Pillow
 reportlab
@@ -19,6 +19,6 @@ boto3
 opencv-python
 numpy
 bitsandbytes
-accelerate
 hf_transfer
 huggingface_hub
+qwen-vl-utils
