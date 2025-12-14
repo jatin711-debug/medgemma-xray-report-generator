@@ -68,7 +68,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-pdf_generator = UltimatePDFGenerator("reports")
+pdf_generator = PremiumReportGenerator("reports")
 
 
 # Request models
