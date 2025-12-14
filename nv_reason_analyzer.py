@@ -79,8 +79,8 @@ class NVReasonCXRAnalyzer:
         """
         Load the NV-Reason-CXR-3B model with memory optimization.
         
-        Uses float16 precision and eager attention implementation
-        to enable attention weight extraction for heatmap generation.
+        Uses 4-bit quantization for memory efficiency while maintaining
+        attention weight extraction for heatmap generation.
         """
         if self.model_loaded:
             logger.info("NV-Reason-CXR model already loaded.")
@@ -90,20 +90,32 @@ class NVReasonCXRAnalyzer:
         logger.info(f"Loading NV-Reason-CXR-3B on device: {device}")
         logger.info(f"System memory before loading NV-Reason: {self.get_system_memory_info()}")
         
+        # Clear GPU cache before loading
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+        
         try:
             self.processor = AutoProcessor.from_pretrained(self.model_id)
             
-            # Load model with float16 for better attention extraction
-            # Using eager attention to get attention weights
+            # 4-bit quantization for memory efficiency
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16
+            )
+            
+            # Load model with 4-bit quantization
             self.model = AutoModelForImageTextToText.from_pretrained(
                 self.model_id,
+                quantization_config=quantization_config,
                 torch_dtype=torch.float16,
                 attn_implementation="eager",  # Required for attention scores
                 device_map="auto"
             ).eval()
             
             self.model_loaded = True
-            logger.info("NV-Reason-CXR-3B model loaded successfully.")
+            logger.info("NV-Reason-CXR-3B model loaded successfully (4-bit quantized).")
             logger.info(f"System memory after loading NV-Reason: {self.get_system_memory_info()}")
             
         except Exception as e:
@@ -223,6 +235,10 @@ class NVReasonCXRAnalyzer:
             
             attentions = None
             
+            # Clear cache before inference to free memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             with torch.inference_mode():
                 # First, try to get attentions from a forward pass
                 try:
@@ -237,14 +253,18 @@ class NVReasonCXRAnalyzer:
                 except Exception as e:
                     logger.warning(f"NV-Reason forward pass for attentions failed: {e}")
                 
-                # Generate response
+                # Clear cache before generation
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                # Generate response with reduced tokens to save memory
                 generated_ids = self.model.generate(
                     **inputs,
-                    max_new_tokens=2048,
+                    max_new_tokens=512,  # Reduced from 2048 to save memory
                     do_sample=False,
-                    output_attentions=True,
+                    output_attentions=False,  # Skip attentions in generate (we have them from forward)
                     return_dict_in_generate=True,
-                    use_cache=False
+                    use_cache=True  # Use cache for faster generation
                 )
                 
                 # Try to extract attentions from generation if not from forward pass
