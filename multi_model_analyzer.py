@@ -284,8 +284,12 @@ class MultiModelAnalyzer:
             parts = []
             if only_mg:
                 parts.append(f"MedGemma detected: {', '.join([a.title() for a in only_mg])}")
+            elif len(mg_abnormalities) == 0:
+                parts.append("MedGemma detected: No Evidence Of Pneumothorax, Pneumonia, Or Tb Found")
             if only_nv:
                 parts.append(f"NV-Reason detected: {', '.join([a.title() for a in only_nv])}")
+            elif len(nv_abnormalities) == 0:
+                parts.append("NV-Reason detected: No significant findings")
             impression = " | ".join(parts) + ". Partial agreement - recommend specialist review."
         else:
             impression = "AI analysis inconclusive. Recommend radiologist review."

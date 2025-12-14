@@ -270,11 +270,26 @@ class PremiumReportGenerator:
              Paragraph("<b>NV-Reason</b>", ParagraphStyle('H', parent=self.styles['body'], alignment=TA_CENTER, fontSize=8))],
         ]
         
+        # Check if abnormalities list contains "no evidence" fallback message
+        def is_real_detection(abnormalities_list, condition_key):
+            """Return True only if condition is actually detected (not in negation)."""
+            if not abnormalities_list:
+                return False
+            for a in abnormalities_list:
+                a_lower = a.lower()
+                # Skip the "no evidence" fallback message
+                if 'no evidence' in a_lower or 'not detected' in a_lower:
+                    continue
+                # Check for actual detection
+                if condition_key in a_lower:
+                    return True
+            return False
+        
         # Detection rows
         for display_name, key in conditions:
-            detected = any(key in a for a in all_abnormalities)
-            mg_agrees = any(key in a for a in mg_abnormalities)
-            nv_agrees = any(key in a for a in nv_abnormalities) if nv_abnormalities else mg_agrees
+            detected = is_real_detection(all_abnormalities, key)
+            mg_agrees = is_real_detection(mg_abnormalities, key)
+            nv_agrees = is_real_detection(nv_abnormalities, key) if nv_abnormalities else False
             
             detection_data.append(self._create_detection_row(
                 display_name, detected, mg_agrees, nv_agrees
