@@ -375,8 +375,8 @@ class MedGemmaGradCAM:
                 cam = cam[1:]
                 grid_size = sqrt_patches
             else:
-                # Try common grid sizes
-                for gs in [14, 16, 24, 28, 32]:
+                # Try common grid sizes (including 64 for MedGemma's 4096 patches)
+                for gs in [14, 16, 24, 28, 32, 64]:
                     if gs * gs == num_patches or gs * gs == num_patches - 1:
                         grid_size = gs
                         if gs * gs == num_patches - 1:

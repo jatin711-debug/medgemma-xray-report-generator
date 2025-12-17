@@ -594,10 +594,11 @@ class MedicalImageAnalyzer:
             avg_attentions = stacked_attentions.mean(dim=(0, 2))
             attention_map_tensor = avg_attentions.squeeze(0).cpu().detach()
 
-            # MedGemma 4B uses SigLIP encoder: 896x896 -> 256 tokens (16x16 grid)
-            # Reference: https://www.kaggle.com/code/huseyincavus/medgemma-attention-values
-            NUM_IMAGE_TOKENS = 256
-            GRID_SIZE = 16
+            # MedGemma 4B uses SigLIP encoder with 14-pixel patches
+            # 896x896 image / 14 patch size = 64x64 = 4096 tokens
+            # Reference: Actual model output shows (1, 4096, 1152) activations
+            NUM_IMAGE_TOKENS = 4096
+            GRID_SIZE = 64
             
             try:
                 # Try to get actual values from processor if available
