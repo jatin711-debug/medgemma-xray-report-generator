@@ -188,20 +188,21 @@ class MultiModelAnalyzer:
             nv_findings=nv_findings
         )
         
-        # Generate zone-based heatmap from parsed locations (preferred)
-        if nv_success and nv_findings and nv_findings.locations:
-            primary_heatmap = self.nv_reason.generate_zone_heatmap(nv_findings.locations, image)
-            logger.info(f"Using zone-based heatmap from {len(nv_findings.locations)} locations")
-        elif nv_success and nv_heatmap is not None:
-            primary_heatmap = nv_heatmap
-            logger.info("Using NV-Reason-CXR attention heatmap (fallback)")
-        elif medgemma_success and medgemma_heatmap is not None:
+        # Heatmap Priority (MedGemma verified, NV-Reason unverified)
+        # 1. MedGemma attention heatmap (VERIFIED: correct token positions 5-260)
+        # 2. NV-Reason zone-based heatmap (uses parsed text locations, not attention)
+        # 3. Placeholder
+        if medgemma_success and medgemma_heatmap is not None:
             primary_heatmap = medgemma_heatmap
-            logger.info("Using MedGemma heatmap (fallback)")
+            logger.info("✅ Using MedGemma heatmap (VERIFIED attention extraction)")
+        elif nv_success and nv_findings and nv_findings.locations:
+            # Zone-based heatmap doesn't depend on attention extraction
+            primary_heatmap = self.nv_reason.generate_zone_heatmap(nv_findings.locations, image)
+            logger.info(f"Using NV-Reason zone-based heatmap from {len(nv_findings.locations)} parsed locations")
         else:
             # Create placeholder
             primary_heatmap = self._create_placeholder_heatmap(image)
-            logger.warning("No heatmap available from either model, using placeholder")
+            logger.warning("No verified heatmap available, using placeholder")
         
         # Generate additional visualization maps
         # For now, we return the primary heatmap for all map types

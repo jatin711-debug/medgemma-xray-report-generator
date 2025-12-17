@@ -498,54 +498,81 @@ class MedicalImageAnalyzer:
                 num_image_patches = NUM_IMAGE_TOKENS
             
             seq_len = attention_map_tensor.shape[0]
-            # Ensure num_text_tokens is calculated correctly based on actual sequence length from model
-            # The image patches might not always be 'num_image_patches' if seq_len is smaller
-            # This happens if the text part of the input is very short.
-            # Let's assume the image part is `num_image_patches` and text is `seq_len - num_image_patches`
-            # However, the actual number of image tokens in attention_map_tensor might be related to `grid_size*grid_size`
-            # The critical part is `text_to_image_attention = attention_map_tensor[:-num_image_patches, -num_image_patches:]`
-            # Let's assume the last `num_image_patches` tokens are image tokens.
+            logger.info(f"Attention map seq_len: {seq_len}, expected image tokens: {num_image_patches}")
             
-            actual_num_image_tokens_in_map = num_image_patches
-            if seq_len < num_image_patches:
-                 logger.warning(f"Sequence length ({seq_len}) is smaller than expected image patches ({num_image_patches}). Adjusting.")
-                 actual_num_image_tokens_in_map = seq_len # Cannot have more image tokens than seq_len
-
-            num_text_tokens = seq_len - actual_num_image_tokens_in_map
+            # VERIFIED from debug_attention.py:
+            # - MedGemma uses token ID 262144 for image placeholders
+            # - Image tokens are at positions 5-260 (256 tokens total)
+            # - Sequence structure: [BOS, role, ..., IMG_START(255999), IMG×256, text, ...]
+            # 
+            # For heatmap: we want attention FROM text tokens TO image tokens
+            # Text tokens are AFTER the image tokens (positions ~261 onwards)
             
-            if num_text_tokens < 1 : # No text tokens to average attention from
-                logger.warning(f"Not enough text tokens ({num_text_tokens}) for heatmap based on seq_len {seq_len} and image_tokens {actual_num_image_tokens_in_map}. Using placeholder.")
+            # Image tokens are approximately at positions 5 to (5 + 256 - 1) = 5 to 260
+            IMG_TOKEN_START = 5  # Approximate start position (after BOS and role tokens)
+            IMG_TOKEN_END = IMG_TOKEN_START + num_image_patches  # 5 + 256 = 261
+            
+            # Ensure we don't exceed sequence length
+            if IMG_TOKEN_END > seq_len:
+                logger.warning(f"Image token end ({IMG_TOKEN_END}) exceeds seq_len ({seq_len}). Adjusting.")
+                IMG_TOKEN_END = seq_len
+                actual_num_image_tokens = IMG_TOKEN_END - IMG_TOKEN_START
+            else:
+                actual_num_image_tokens = num_image_patches
+            
+            # Text tokens come after image tokens
+            TEXT_TOKEN_START = IMG_TOKEN_END
+            num_text_tokens = seq_len - TEXT_TOKEN_START
+            
+            logger.info(f"Token positions: image [{IMG_TOKEN_START}:{IMG_TOKEN_END}] ({actual_num_image_tokens} tokens), "
+                       f"text [{TEXT_TOKEN_START}:{seq_len}] ({num_text_tokens} tokens)")
+            
+            if num_text_tokens < 1:
+                logger.warning(f"Not enough text tokens ({num_text_tokens}) for heatmap. Using placeholder.")
                 placeholder_heatmap_overlay = self._create_placeholder_heatmap(original_image)
                 placeholder_raw_normalized = np.ones((grid_size, grid_size), dtype=np.float32) * 0.5
                 return placeholder_heatmap_overlay, placeholder_raw_normalized
-
-            # Attention from text tokens to image tokens
-            # Text tokens are assumed to be first, image tokens last.
-            text_to_image_attention = attention_map_tensor[:num_text_tokens, -actual_num_image_tokens_in_map:]
-
-            if text_to_image_attention.shape[1] != num_image_patches: # Check if the slice width matches expected patches
-                 logger.warning(f"Sliced text_to_image_attention width ({text_to_image_attention.shape[1]}) "
-                                f"does not match num_image_patches ({num_image_patches}). Using placeholder.")
-                 placeholder_heatmap_overlay = self._create_placeholder_heatmap(original_image)
-                 placeholder_raw_normalized = np.ones((grid_size, grid_size), dtype=np.float32) * 0.5
-                 return placeholder_heatmap_overlay, placeholder_raw_normalized
-
-            image_attention = text_to_image_attention.mean(dim=0) # Average attention from all text tokens to each image patch
-
-            if image_attention.shape[0] != num_image_patches: # Final check on the vector length
-                 logger.warning(f"Resulting image attention vector length ({image_attention.shape[0]}) "
-                                f"does not match num_image_patches ({num_image_patches}). Using placeholder.")
-                 placeholder_heatmap_overlay = self._create_placeholder_heatmap(original_image)
-                 placeholder_raw_normalized = np.ones((grid_size, grid_size), dtype=np.float32) * 0.5
-                 return placeholder_heatmap_overlay, placeholder_raw_normalized
-
+            
+            # Extract attention FROM text tokens TO image tokens
+            # attention_map_tensor shape: (seq_len, seq_len) where [i, j] = attention from token i to token j
+            text_to_image_attention = attention_map_tensor[TEXT_TOKEN_START:seq_len, IMG_TOKEN_START:IMG_TOKEN_END]
+            
+            logger.info(f"text_to_image_attention shape: {text_to_image_attention.shape}")
+            
+            if text_to_image_attention.shape[1] != actual_num_image_tokens:
+                logger.warning(f"Attention slice width ({text_to_image_attention.shape[1]}) != expected ({actual_num_image_tokens}). Using placeholder.")
+                placeholder_heatmap_overlay = self._create_placeholder_heatmap(original_image)
+                placeholder_raw_normalized = np.ones((grid_size, grid_size), dtype=np.float32) * 0.5
+                return placeholder_heatmap_overlay, placeholder_raw_normalized
+            
+            # Average attention across all text tokens to get per-image-patch importance
+            image_attention = text_to_image_attention.mean(dim=0)
+            
+            # Log attention statistics for debugging
+            logger.info(f"Image attention stats: min={image_attention.min():.4f}, max={image_attention.max():.4f}, "
+                       f"mean={image_attention.mean():.4f}, std={image_attention.std():.4f}")
+            
+            # Reshape to grid (sqrt check for exact fit)
+            if actual_num_image_tokens != grid_size * grid_size:
+                # Try to find a valid grid size
+                sqrt_tokens = int(actual_num_image_tokens ** 0.5)
+                if sqrt_tokens * sqrt_tokens == actual_num_image_tokens:
+                    grid_size = sqrt_tokens
+                    logger.info(f"Adjusted grid size to {grid_size}x{grid_size}")
+                else:
+                    logger.warning(f"Cannot reshape {actual_num_image_tokens} tokens to square grid. Using placeholder.")
+                    placeholder_heatmap_overlay = self._create_placeholder_heatmap(original_image)
+                    placeholder_raw_normalized = np.ones((grid_size, grid_size), dtype=np.float32) * 0.5
+                    return placeholder_heatmap_overlay, placeholder_raw_normalized
+            
             heatmap_raw_np = image_attention.reshape(grid_size, grid_size).numpy()
-
+            
             if heatmap_raw_np.max() > heatmap_raw_np.min():
                 heatmap_raw_normalized = (heatmap_raw_np - heatmap_raw_np.min()) / (heatmap_raw_np.max() - heatmap_raw_np.min())
             else:
                 heatmap_raw_normalized = np.zeros_like(heatmap_raw_np)
-
+            
+            logger.info(f"✅ Generated heatmap with grid {grid_size}x{grid_size}")
             heatmap_overlay_image = self._create_heatmap_overlay(np.copy(heatmap_raw_np), original_image)
 
             return heatmap_overlay_image, heatmap_raw_normalized
