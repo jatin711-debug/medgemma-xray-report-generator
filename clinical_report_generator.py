@@ -421,59 +421,121 @@ class ClinicalReportGenerator:
     # =========================================================================
     
     def _build_executive_summary(self, consensus_data: Dict, condition_confidences: Dict) -> List:
-        """Build executive summary section."""
+        """Build executive summary section with urgency triage and negative findings."""
         elements = []
         
-        # Determine overall status
-        has_detection = any(conf >= 0.7 for conf in condition_confidences.values()) if condition_confidences else False
+        # Determine overall status and urgency level
+        detected_conditions = []
+        possible_conditions = []
+        clear_conditions = []
+        
+        if condition_confidences:
+            for cond, conf in condition_confidences.items():
+                cond_display = cond.replace('_', ' ').title()
+                if conf >= 0.7:
+                    detected_conditions.append((cond_display, conf))
+                elif conf >= 0.4:
+                    possible_conditions.append((cond_display, conf))
+                else:
+                    clear_conditions.append((cond_display, conf))
+        
+        has_detection = len(detected_conditions) > 0
+        has_possible = len(possible_conditions) > 0
         consensus_level = consensus_data.get('consensus_level', 'N/A') if consensus_data else 'single-model'
         
+        # Determine urgency level
         if has_detection:
+            urgency = "STAT"
+            urgency_color = self.colors['danger']
+            urgency_bg = self.colors['danger_light']
+            urgency_desc = "Immediate radiologist review recommended"
             status_text = "ABNORMALITY DETECTED"
-            status_color = self.colors['danger']
-            bg_color = self.colors['danger_light']
+        elif has_possible:
+            urgency = "ROUTINE"
+            urgency_color = self.colors['warning']
+            urgency_bg = self.colors['warning_light']
+            urgency_desc = "Findings require clinical correlation"
+            status_text = "POSSIBLE FINDINGS"
         else:
+            urgency = "NORMAL"
+            urgency_color = self.colors['success']
+            urgency_bg = self.colors['success_light']
+            urgency_desc = "No significant abnormalities detected"
             status_text = "NO SIGNIFICANT ABNORMALITIES"
-            status_color = self.colors['success']
-            bg_color = self.colors['success_light']
         
-        # Summary card
-        status_style = ParagraphStyle(
-            'Status', fontName=self.font_display, fontSize=14,
-            textColor=status_color, alignment=TA_CENTER, spaceAfter=8
+        # =========== URGENCY TRIAGE BADGE ===========
+        urgency_badge = Table(
+            [[Paragraph(f"<b>🚨 {urgency}</b>", ParagraphStyle(
+                'UrgencyTitle', fontName=self.font_display, fontSize=16,
+                textColor=urgency_color, alignment=TA_CENTER
+            ))],
+            [Paragraph(urgency_desc, ParagraphStyle(
+                'UrgencyDesc', parent=self.styles['body_small'],
+                alignment=TA_CENTER, textColor=self.colors['gray_600']
+            ))]],
+            colWidths=[self.CONTENT_WIDTH - 40]
         )
-        
-        # Find highest confidence condition
-        if condition_confidences:
-            top_condition = max(condition_confidences.items(), key=lambda x: x[1])
-            summary_text = f"{top_condition[0].replace('_', ' ').title()}: {int(top_condition[1] * 100)}% confidence"
-        else:
-            summary_text = "Analysis complete"
-        
-        summary_content = [
-            [Paragraph(f"⚕ {status_text}", status_style)],
-            [Paragraph(summary_text, ParagraphStyle(
-                'SummaryText', parent=self.styles['body'],
-                alignment=TA_CENTER, textColor=self.colors['gray_700']
-            ))],
-            [Paragraph(f"Model Consensus: <b>{consensus_level.upper()}</b>", ParagraphStyle(
-                'ConsensusText', parent=self.styles['body_small'],
-                alignment=TA_CENTER
-            ))],
-        ]
-        
-        summary_table = Table(summary_content, colWidths=[self.CONTENT_WIDTH - 40])
-        summary_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), bg_color),
-            ('LINEABOVE', (0, 0), (-1, 0), 3, status_color),
+        urgency_badge.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), urgency_bg),
+            ('LINEABOVE', (0, 0), (-1, 0), 4, urgency_color),
             ('BOX', (0, 0), (-1, -1), 1, self.colors['gray_200']),
-            ('TOPPADDING', (0, 0), (-1, -1), 20),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 20),
-            ('LEFTPADDING', (0, 0), (-1, -1), 20),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 20),
+            ('TOPPADDING', (0, 0), (-1, -1), 15),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 15),
         ]))
+        elements.append(urgency_badge)
+        elements.append(Spacer(1, 15))
         
-        elements.append(summary_table)
+        # =========== PRIMARY FINDINGS ===========
+        findings_content = []
+        
+        # Detected conditions (high confidence)
+        if detected_conditions:
+            detected_text = ", ".join([f"<b>{c[0]}</b> ({int(c[1]*100)}%)" for c in detected_conditions])
+            findings_content.append([Paragraph(
+                f"<font color='#EF4444'>⚠ DETECTED:</font> {detected_text}",
+                self.styles['body']
+            )])
+        
+        # Possible conditions (medium confidence)
+        if possible_conditions:
+            possible_text = ", ".join([f"{c[0]} ({int(c[1]*100)}%)" for c in possible_conditions])
+            findings_content.append([Paragraph(
+                f"<font color='#F59E0B'>⚡ POSSIBLE:</font> {possible_text}",
+                self.styles['body']
+            )])
+        
+        # =========== EXPLICIT NEGATIVE FINDINGS ===========
+        if clear_conditions:
+            clear_names = [c[0] for c in clear_conditions]
+            negative_text = f"No radiographic evidence of {', '.join(clear_names[:-1])}" if len(clear_names) > 1 else f"No radiographic evidence of {clear_names[0]}"
+            if len(clear_names) > 1:
+                negative_text += f" or {clear_names[-1]}"
+            negative_text += " was detected."
+            
+            findings_content.append([Paragraph(
+                f"<font color='#10B981'>✓ NEGATIVE:</font> {negative_text}",
+                self.styles['body']
+            )])
+        
+        # Add model consensus
+        findings_content.append([Paragraph(
+            f"<b>Model Consensus:</b> {consensus_level.upper()}",
+            self.styles['body_small']
+        )])
+        
+        if findings_content:
+            findings_table = Table(findings_content, colWidths=[self.CONTENT_WIDTH - 60])
+            findings_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), self.colors['white']),
+                ('BOX', (0, 0), (-1, -1), 1, self.colors['gray_200']),
+                ('TOPPADDING', (0, 0), (-1, -1), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+                ('LEFTPADDING', (0, 0), (-1, -1), 15),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 15),
+                ('LINEBELOW', (0, 0), (-1, -2), 0.5, self.colors['gray_100']),
+            ]))
+            elements.append(findings_table)
+        
         return elements
     
     def _build_side_by_side_images(self, original: Image.Image, heatmap: Image.Image,
@@ -925,19 +987,29 @@ class ClinicalReportGenerator:
             "Warmer colors (red/yellow) indicate areas of greater model focus.</i>",
             self.styles['body_small']
         ))
+        story.append(PageBreak())
         
-        # Add density map if available (still on page 2)
-        if density_saliency_image is not None:
-            story.append(Spacer(1, 25))
-            story.append(Paragraph("DENSITY VISUALIZATION", self.styles['subsection_title']))
+        # =====================================================================
+        # PAGE 3: LESION LOCALIZATION + DENSITY VISUALIZATION
+        # =====================================================================
+        if localization_map is not None:
+            story.append(Paragraph("LESION LOCALIZATION", self.styles['section_title']))
             story.append(Spacer(1, 10))
+            story.extend(self._build_localization_section(localization_map, detected_regions or []))
+            story.append(Spacer(1, 25))
+        
+        # Density visualization - now AFTER localization, kept together
+        if density_saliency_image is not None:
+            density_elements = []
+            density_elements.append(Paragraph("DENSITY VISUALIZATION", self.styles['subsection_title']))
+            density_elements.append(Spacer(1, 10))
             
-            density_width = self.CONTENT_WIDTH * 0.6
+            density_width = self.CONTENT_WIDTH * 0.55
             rl_density = self._pil_to_reportlab(density_saliency_image, density_width, enhance=True)
             
             density_table = Table(
                 [[rl_density],
-                 [Paragraph("Opacity-based Density Map", self.styles['caption'])]],
+                 [Paragraph("Opacity-based Density Map (Non-AI visualization)", self.styles['caption'])]],
                 colWidths=[density_width + 20]
             )
             density_table.setStyle(TableStyle([
@@ -947,18 +1019,12 @@ class ClinicalReportGenerator:
                 ('TOPPADDING', (0, 0), (-1, -1), 15),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 15),
             ]))
-            story.append(density_table)
+            density_elements.append(density_table)
+            
+            # KeepTogether prevents title and image from splitting across pages
+            story.append(KeepTogether(density_elements))
         
         story.append(PageBreak())
-        
-        # =====================================================================
-        # PAGE 3: LESION LOCALIZATION
-        # =====================================================================
-        if localization_map is not None:
-            story.append(Paragraph("LESION LOCALIZATION", self.styles['section_title']))
-            story.append(Spacer(1, 10))
-            story.extend(self._build_localization_section(localization_map, detected_regions or []))
-            story.append(PageBreak())
         
         # =====================================================================
         # PAGE 4: DIAGNOSTIC PROBABILITY
