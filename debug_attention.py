@@ -24,11 +24,29 @@ def debug_medgemma_attention():
         device_map="auto"
     )
     
-    # Download a sample chest X-ray
+    # Download a sample chest X-ray (with proper headers to avoid 403)
     print("Downloading sample image...")
     url = "https://upload.wikimedia.org/wikipedia/commons/c/c8/Chest_Xray_PA_3-8-2010.png"
-    response = requests.get(url)
-    image = Image.open(BytesIO(response.content)).convert("RGB")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        image = Image.open(BytesIO(response.content)).convert("RGB")
+        print(f"  Downloaded image: {image.size}")
+    except Exception as e:
+        print(f"  Failed to download ({e}), creating synthetic test image...")
+        # Create a simple grayscale test image (simulating chest X-ray)
+        import numpy as np
+        # Create gradient image to simulate chest X-ray
+        arr = np.zeros((512, 512), dtype=np.uint8)
+        # Add some structure
+        arr[100:400, 150:350] = 180  # Lung fields
+        arr[200:350, 220:290] = 100  # Heart shadow
+        image = Image.fromarray(arr).convert("RGB")
+        print(f"  Created synthetic test image: {image.size}")
     
     # Resize to expected size
     image_896 = image.resize((896, 896))
