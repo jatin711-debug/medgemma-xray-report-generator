@@ -68,73 +68,116 @@ class MedGemmaGradCAM:
         logger.info("MedGemmaGradCAM initialized")
     
     def _setup_hooks(self):
-        """Set up forward and backward hooks on the vision encoder."""
-        # Find the vision encoder in the model
-        # MedGemma uses SigLIP, accessed via model.vision_tower or similar
+        """Set up forward and backward hooks on the vision encoder.
+        
+        MedGemma-4B-IT uses MedSigLIP (SigLIP-400M variant) with:
+        - 14 transformer layers
+        - 896x896 input resolution
+        - 16x16 grid = 256 patches
+        - Hidden dim: 1024
+        """
+        # Try different paths to find the vision encoder
+        # Based on HuggingFace transformers structure for VLMs
         
         vision_encoder = None
+        encoder_path = None
         
-        # Try different possible paths to the vision encoder
-        if hasattr(self.model, 'vision_tower'):
-            vision_encoder = self.model.vision_tower
-            logger.info("Found vision encoder at model.vision_tower")
-        elif hasattr(self.model, 'model') and hasattr(self.model.model, 'vision_tower'):
-            vision_encoder = self.model.model.vision_tower
-            logger.info("Found vision encoder at model.model.vision_tower")
-        elif hasattr(self.model, 'vision_model'):
-            vision_encoder = self.model.vision_model
-            logger.info("Found vision encoder at model.vision_model")
-        else:
-            # Try to find it by iterating through named modules
-            for name, module in self.model.named_modules():
-                if 'vision' in name.lower() and hasattr(module, 'encoder'):
-                    vision_encoder = module
-                    logger.info(f"Found vision encoder at {name}")
+        # List of paths to try (in order of likelihood for MedGemma)
+        paths_to_try = [
+            ('model.vision_tower', lambda: self.model.vision_tower),
+            ('model.model.vision_tower', lambda: self.model.model.vision_tower),
+            ('model.vision_tower.vision_model', lambda: self.model.vision_tower.vision_model),
+            ('model.model.vision_tower.vision_model', lambda: self.model.model.vision_tower.vision_model),
+            ('model.vision_model', lambda: self.model.vision_model),
+            ('model.model.vision_model', lambda: self.model.model.vision_model),
+        ]
+        
+        for path_name, path_fn in paths_to_try:
+            try:
+                candidate = path_fn()
+                if candidate is not None:
+                    vision_encoder = candidate
+                    encoder_path = path_name
+                    logger.info(f"Found vision encoder at {path_name}")
                     break
+            except AttributeError:
+                continue
+        
+        # Fallback: search through named modules
+        if vision_encoder is None:
+            for name, module in self.model.named_modules():
+                # Look for SigLIP or vision-related modules
+                if any(x in name.lower() for x in ['siglip', 'vision_tower', 'vision_model']):
+                    if hasattr(module, 'encoder') or hasattr(module, 'layers'):
+                        vision_encoder = module
+                        encoder_path = name
+                        logger.info(f"Found vision encoder via search at {name}")
+                        break
         
         if vision_encoder is None:
             logger.warning("Could not find vision encoder. GradCAM will use attention fallback.")
+            logger.info(f"Available top-level attributes: {[n for n in dir(self.model) if not n.startswith('_')]}")
             return
         
-        # Find the last transformer block
+        # Now find the last transformer layer inside the encoder
+        # SigLIP structure: encoder.layers[-1] (14 layers total)
         target_layer = None
+        layer_path = None
         
-        # Try to find encoder blocks
-        if hasattr(vision_encoder, 'encoder'):
-            encoder = vision_encoder.encoder
-            if hasattr(encoder, 'layers'):
-                target_layer = encoder.layers[-1]
-                logger.info(f"Target layer: encoder.layers[-1] ({type(target_layer).__name__})")
-            elif hasattr(encoder, 'blocks'):
-                target_layer = encoder.blocks[-1]
-                logger.info(f"Target layer: encoder.blocks[-1] ({type(target_layer).__name__})")
-        elif hasattr(vision_encoder, 'layers'):
-            target_layer = vision_encoder.layers[-1]
-            logger.info(f"Target layer: vision_encoder.layers[-1]")
-        elif hasattr(vision_encoder, 'blocks'):
-            target_layer = vision_encoder.blocks[-1]
-            logger.info(f"Target layer: vision_encoder.blocks[-1]")
+        # Try different layer access patterns
+        layer_paths = [
+            ('encoder.layers', lambda e: e.encoder.layers[-1]),
+            ('encoder.blocks', lambda e: e.encoder.blocks[-1]),
+            ('layers', lambda e: e.layers[-1]),
+            ('blocks', lambda e: e.blocks[-1]),
+            ('model.encoder.layers', lambda e: e.model.encoder.layers[-1] if hasattr(e, 'model') else None),
+        ]
+        
+        for lpath_name, lpath_fn in layer_paths:
+            try:
+                layer = lpath_fn(vision_encoder)
+                if layer is not None:
+                    target_layer = layer
+                    layer_path = lpath_name
+                    logger.info(f"Target layer found at {encoder_path}.{lpath_name}[-1] ({type(target_layer).__name__})")
+                    break
+            except (AttributeError, IndexError, TypeError):
+                continue
         
         if target_layer is None:
-            # Log available attributes for debugging
-            logger.warning(f"Could not find target layer. Vision encoder attributes: {dir(vision_encoder)}")
+            # Log structure for debugging
+            encoder_attrs = [n for n in dir(vision_encoder) if not n.startswith('_')]
+            logger.warning(f"Could not find target layer. Vision encoder has: {encoder_attrs}")
+            
+            # Try to find any layers/blocks attribute
+            if hasattr(vision_encoder, 'encoder'):
+                sub_attrs = [n for n in dir(vision_encoder.encoder) if not n.startswith('_')]
+                logger.warning(f"vision_encoder.encoder has: {sub_attrs}")
             return
         
         self._target_layer = target_layer
         
         # Register hooks
         def forward_hook(module, input, output):
-            # Handle different output formats (tuple, tensor, etc.)
-            if isinstance(output, tuple):
+            # Handle different output formats (tuple, tensor, BaseModelOutput, etc.)
+            if hasattr(output, 'last_hidden_state'):
+                self.activations = output.last_hidden_state.detach()
+            elif isinstance(output, tuple):
                 self.activations = output[0].detach()
-            else:
+            elif isinstance(output, torch.Tensor):
                 self.activations = output.detach()
+            else:
+                logger.warning(f"Unexpected output type in forward hook: {type(output)}")
+                self.activations = None
         
         def backward_hook(module, grad_input, grad_output):
-            if isinstance(grad_output, tuple):
-                self.gradients = grad_output[0].detach()
-            else:
+            if isinstance(grad_output, tuple) and len(grad_output) > 0:
+                if grad_output[0] is not None:
+                    self.gradients = grad_output[0].detach()
+            elif isinstance(grad_output, torch.Tensor):
                 self.gradients = grad_output.detach()
+            else:
+                logger.warning(f"Unexpected grad_output type: {type(grad_output)}")
         
         handle_fwd = target_layer.register_forward_hook(forward_hook)
         handle_bwd = target_layer.register_full_backward_hook(backward_hook)

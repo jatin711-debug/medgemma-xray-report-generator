@@ -1720,8 +1720,8 @@ async def analyze_url_and_generate_report(
         recommendations=[
             "Clinical correlation recommended",
             "Specialist review if symptoms persist"
-        ] + (["NV-Reason reasoning available in full report"] if consensus.nv_reason_thinking else []),
-        confidence_level=f"{consensus.consensus_level.upper()} (Multi-Model)"
+        ],
+        confidence_level=f"{consensus.medgemma_confidence} (MedGemma)"
     )
     
     # Create adapter response object for PDF generator
