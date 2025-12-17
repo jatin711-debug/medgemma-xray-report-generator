@@ -37,22 +37,21 @@ multi_analyzer = None  # Multi-model analyzer (primary)
 from db import initialize_database, store_analysis_result
 from aws_utils import upload_to_s3 # Import the new S3 upload function
 from multi_model_analyzer import MultiModelAnalyzer, ConsensusFindings, MultiModelAnalysisResponse
-from nv_reason_analyzer import NVReasonFindings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown events."""
     # Startup
-    logger.info("Starting Medical Image Analysis API (Multi-Model: MedGemma + NV-Reason-CXR)...")
+    logger.info("Starting Medical Image Analysis API (MedGemma-4B-IT)...")
     global analyzer, multi_analyzer
     
     # Initialize MedGemma analyzer
     analyzer = MedicalImageAnalyzer()
     await analyzer.load_model()
     
-    # Initialize Multi-Model analyzer (uses NV-Reason-CXR for heatmaps)
+    # Initialize analyzer wrapper
     multi_analyzer = MultiModelAnalyzer()
-    multi_analyzer.set_medgemma_analyzer(analyzer)  # Share MedGemma instance
+    multi_analyzer.set_medgemma_analyzer(analyzer)
     await multi_analyzer.load_models()
     
     logger.info("All models loaded successfully!")
@@ -62,9 +61,9 @@ async def lifespan(app: FastAPI):
 
 # Initialize FastAPI app with lifespan
 app = FastAPI(
-    title="Medical Image Analysis API (Multi-Model)",
-    description="AI-powered medical image analysis using MedGemma-4B-IT and NV-Reason-CXR-3B with consensus-based findings",
-    version="2.0.0",
+    title="Medical Image Analysis API",
+    description="AI-powered medical image analysis using MedGemma-4B-IT (Full Precision)",
+    version="3.0.0",
     lifespan=lifespan
 )
 
@@ -272,25 +271,20 @@ class MedicalImageAnalyzer:
         logger.info(f"Loading model on device: {device}")
         logger.info(f"System memory before loading: {self.get_system_memory_info()}")
 
-        # Configure 4-bit quantization
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16
-        )
+        # NOTE: Loading WITHOUT quantization for better gradient computation (GradCAM support)
+        # This requires more GPU memory (~16GB) but enables accurate attention/gradient extraction
 
         try:
             self.processor = AutoProcessor.from_pretrained(self.model_id, use_fast=True)
             self.model = AutoModelForImageTextToText.from_pretrained(
                 self.model_id,
-                quantization_config=quantization_config,
                 torch_dtype=torch.bfloat16,
                 attn_implementation="eager",  # Required for attention scores
                 device_map="auto"  # Automatically handle device placement
             )
             self.model_loaded = True
             model_loading_error = None
-            logger.info("Model loaded successfully.")
+            logger.info("Model loaded successfully (full precision, no quantization).")
             logger.info(f"System memory after loading: {self.get_system_memory_info()}")
         except Exception as e:
             self.model_loaded = False

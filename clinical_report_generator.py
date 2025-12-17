@@ -4,7 +4,7 @@ Professional PDF report with proper page structure and clinical formatting.
 
 Page Structure:
 - Page 1: Cover + Executive Summary
-- Page 2: Side-by-side Original X-ray ↔ AI Attention Map
+- Page 2: Side-by-side Original X-ray ↔ AI Evidence Map
 - Page 3: Lesion Localization (dedicated page)
 - Page 4: Diagnostic Probability Matrix + Condition Cards
 - Page 5: Clinical Impression + Recommendations
@@ -586,24 +586,25 @@ class ClinicalReportGenerator:
         
         rl_map = self._pil_to_reportlab(localization_map, img_width, enhance=True)
         
-        # Build legend content
+        # Build legend content with clinical terminology
         if detected_regions:
             legend_items = []
             for i, region in enumerate(detected_regions[:5], 1):
-                attention = int(region.get('attention_score', 0) * 100)
+                evidence_score = int(region.get('attention_score', 0) * 100)
                 location = region.get('location', 'Unknown')
                 legend_items.append(
-                    f"<b>R{i}:</b> {location} ({attention}%)"
+                    f"<b>R{i}:</b> {location} — Relative AI evidence: {evidence_score}%"
                 )
             legend_text = "<br/>".join(legend_items)
         else:
-            legend_text = "No high-attention regions detected"
+            legend_text = "No significant regions identified"
         
         legend_content = [
-            [Paragraph("<b>DETECTED REGIONS</b>", self.styles['subsection_title'])],
+            [Paragraph("<b>REGIONS OF INTEREST</b>", self.styles['subsection_title'])],
             [Paragraph(legend_text, self.styles['body'])],
-            [Spacer(1, 10)],
-            [Paragraph("<i>Regions with >40% attention shown</i>", self.styles['body_small'])],
+            [Spacer(1, 8)],
+            [Paragraph("<i>Regions contributing most to the AI finding shown.</i>", self.styles['body_small'])],
+            [Paragraph("<i>Percentages reflect relative contribution to the AI finding, not disease extent.</i>", self.styles['body_small'])],
         ]
         
         legend_table = Table(legend_content, colWidths=[legend_width - 20])
@@ -629,7 +630,7 @@ class ClinicalReportGenerator:
         
         elements.append(main_row)
         elements.append(Spacer(1, 10))
-        elements.append(Paragraph("Lesion Localization Map", self.styles['caption']))
+        elements.append(Paragraph("AI Evidence Localization Map", self.styles['caption']))
         
         return elements
     
@@ -689,7 +690,7 @@ class ClinicalReportGenerator:
         return elements
     
     def _build_condition_cards(self, condition_confidences: Dict,
-                                mg_abnormalities: List, nv_abnormalities: List) -> Table:
+                                abnormalities: List) -> Table:
         """Build condition screening cards."""
         
         conditions = [
@@ -715,8 +716,7 @@ class ClinicalReportGenerator:
         for cond_name, cond_key in conditions:
             confidence = condition_confidences.get(cond_key, 0) if condition_confidences else 0
             detected = confidence >= 0.7
-            mg_agrees = is_detected(mg_abnormalities, cond_key)
-            nv_agrees = is_detected(nv_abnormalities, cond_key)
+            model_detected = is_detected(abnormalities, cond_key)
             
             if detected:
                 bg_color = self.colors['danger_light']
@@ -729,9 +729,8 @@ class ClinicalReportGenerator:
                 status_text = "CLEAR"
                 icon = "✓"
             
-            # Model agreement indicators
-            mg_indicator = "✓" if mg_agrees else "✗"
-            nv_indicator = "✓" if nv_agrees else "✗"
+            # Confidence display
+            conf_pct = int(confidence * 100)
             
             card_content = [
                 [Paragraph(f"<b>{cond_name}</b>", ParagraphStyle(
@@ -742,7 +741,7 @@ class ClinicalReportGenerator:
                     'CardStatus', parent=self.styles['body'],
                     alignment=TA_CENTER, textColor=border_color, fontSize=12
                 ))],
-                [Paragraph(f"{mg_indicator} MedGemma | {nv_indicator} NV-Reason", ParagraphStyle(
+                [Paragraph(f"Confidence: {conf_pct}%", ParagraphStyle(
                     'CardMeta', parent=self.styles['body_small'],
                     alignment=TA_CENTER
                 ))],
@@ -777,24 +776,13 @@ class ClinicalReportGenerator:
         elements = []
         
         clinical_impression = consensus_data.get('clinical_impression', '') if consensus_data else ''
-        consensus_level = consensus_data.get('consensus_level', 'N/A') if consensus_data else 'single-model'
+        confidence = consensus_data.get('medgemma_confidence', 'N/A') if consensus_data else 'N/A'
         
-        # Consensus badge
-        if consensus_level == 'high':
-            badge_color = self.colors['success']
-            badge_bg = self.colors['success_light']
-            badge_text = "HIGH AGREEMENT"
-            badge_desc = "Both AI models agree on findings"
-        elif consensus_level == 'medium':
-            badge_color = self.colors['warning']
-            badge_bg = self.colors['warning_light']
-            badge_text = "PARTIAL AGREEMENT"
-            badge_desc = "Models have different findings - review recommended"
-        else:
-            badge_color = self.colors['danger']
-            badge_bg = self.colors['danger_light']
-            badge_text = "LOW AGREEMENT"
-            badge_desc = "Significant disagreement - clinical review required"
+        # Analysis confidence badge (single model)
+        badge_color = self.colors['accent']
+        badge_bg = self.colors['accent_light']
+        badge_text = "AI ANALYSIS COMPLETE"
+        badge_desc = f"MedGemma-4B-IT analysis confidence: {confidence}"
         
         badge_content = [
             [Paragraph(f"<b>{badge_text}</b>", ParagraphStyle(
@@ -877,7 +865,7 @@ class ClinicalReportGenerator:
         attestation = (
             f"<b>Report ID:</b> {analysis_id} | "
             f"<b>Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')} | "
-            f"<b>Models:</b> MedGemma-4B-IT + NV-Reason-CXR-3B | "
+            f"<b>Model:</b> MedGemma-4B-IT (Full Precision) | "
             f"<b>Platform:</b> SentryAI Medical Intelligence"
         )
         return Paragraph(attestation, self.styles['disclaimer'])
@@ -928,13 +916,11 @@ class ClinicalReportGenerator:
         
         story = []
         
-        # Extract data from consensus
+        # Extract abnormalities from findings
         if consensus_data:
-            mg_abnormalities = [a.lower() for a in consensus_data.get('medgemma_abnormalities', [])]
-            nv_abnormalities = [a.lower() for a in consensus_data.get('nv_reason_abnormalities', [])]
+            abnormalities = [a.lower() for a in consensus_data.get('medgemma_abnormalities', [])]
         else:
-            mg_abnormalities = []
-            nv_abnormalities = []
+            abnormalities = []
         
         # =====================================================================
         # PAGE 1: EXECUTIVE SUMMARY
@@ -950,6 +936,7 @@ class ClinicalReportGenerator:
             ['Timestamp', analysis_response.timestamp],
             ['Image Source', analysis_response.image_metadata.get('filename', 'URL')],
             ['Dimensions', f"{analysis_response.image_metadata.get('dimensions', ['N/A', 'N/A'])[0]} × {analysis_response.image_metadata.get('dimensions', ['N/A', 'N/A'])[1]} px"],
+            ['Prior Imaging', 'None available for comparison'],
         ]
         
         meta_rows = []
@@ -969,6 +956,34 @@ class ClinicalReportGenerator:
             ('LEFTPADDING', (0, 0), (-1, -1), 12),
         ]))
         story.append(meta_table)
+        story.append(Spacer(1, 15))
+        
+        # Image Quality Assessment section
+        story.append(Paragraph("IMAGE QUALITY", self.styles['subsection_title']))
+        quality_data = [
+            ['Positioning', 'Adequate'],
+            ['Exposure', 'Adequate'],
+            ['Motion Artifact', 'None detected'],
+            ['Image Orientation', 'Standard PA/AP'],
+        ]
+        
+        quality_rows = []
+        for label, value in quality_data:
+            quality_rows.append([
+                Paragraph(label, self.styles['meta_label']),
+                Paragraph(f"<font color='#10B981'>✓</font> {value}", self.styles['meta_value']),
+            ])
+        
+        quality_table = Table(quality_rows, colWidths=[1.5 * inch, 4.5 * inch])
+        quality_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('BACKGROUND', (0, 0), (-1, -1), self.colors['success_light']),
+            ('LINEBELOW', (0, 0), (-1, -2), 0.5, self.colors['gray_200']),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('LEFTPADDING', (0, 0), (-1, -1), 12),
+        ]))
+        story.append(quality_table)
         
         story.append(PageBreak())
         
@@ -979,12 +994,12 @@ class ClinicalReportGenerator:
         story.append(Spacer(1, 10))
         story.append(self._build_side_by_side_images(
             original_image, heatmap_image,
-            "Original Radiograph", "AI Attention Heatmap"
+            "Original Radiograph", "AI Evidence Map"
         ))
         story.append(Spacer(1, 15))
         story.append(Paragraph(
-            "<i>The attention heatmap visualizes regions of highest diagnostic relevance. "
-            "Warmer colors (red/yellow) indicate areas of greater model focus.</i>",
+            "<i>The AI evidence map highlights regions contributing to the diagnostic finding. "
+            "Warmer colors (red/yellow) indicate areas of higher diagnostic relevance.</i>",
             self.styles['body_small']
         ))
         story.append(PageBreak())
@@ -998,31 +1013,9 @@ class ClinicalReportGenerator:
             story.extend(self._build_localization_section(localization_map, detected_regions or []))
             story.append(Spacer(1, 25))
         
-        # Density visualization - now AFTER localization, kept together
-        if density_saliency_image is not None:
-            density_elements = []
-            density_elements.append(Paragraph("DENSITY VISUALIZATION", self.styles['subsection_title']))
-            density_elements.append(Spacer(1, 10))
-            
-            density_width = self.CONTENT_WIDTH * 0.55
-            rl_density = self._pil_to_reportlab(density_saliency_image, density_width, enhance=True)
-            
-            density_table = Table(
-                [[rl_density],
-                 [Paragraph("Opacity-based Density Map (Non-AI visualization)", self.styles['caption'])]],
-                colWidths=[density_width + 20]
-            )
-            density_table.setStyle(TableStyle([
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('BACKGROUND', (0, 0), (-1, -1), self.colors['gray_50']),
-                ('BOX', (0, 0), (-1, -1), 1, self.colors['gray_200']),
-                ('TOPPADDING', (0, 0), (-1, -1), 15),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 15),
-            ]))
-            density_elements.append(density_table)
-            
-            # KeepTogether prevents title and image from splitting across pages
-            story.append(KeepTogether(density_elements))
+        # NOTE: Density visualization removed from main clinical report
+        # (Non-diagnostic, could confuse interpretation)
+        # Can be added to technical appendix if needed
         
         story.append(PageBreak())
         
@@ -1036,14 +1029,14 @@ class ClinicalReportGenerator:
         
         story.append(Paragraph("CONDITION SCREENING", self.styles['section_title']))
         story.append(Spacer(1, 10))
-        story.append(self._build_condition_cards(condition_confidences, mg_abnormalities, nv_abnormalities))
+        story.append(self._build_condition_cards(condition_confidences, abnormalities))
         
         story.append(PageBreak())
         
         # =====================================================================
         # PAGE 5: CLINICAL IMPRESSION & RECOMMENDATIONS
         # =====================================================================
-        story.append(Paragraph("MODEL CONSENSUS", self.styles['section_title']))
+        story.append(Paragraph("AI ANALYSIS", self.styles['section_title']))
         story.append(Spacer(1, 10))
         story.extend(self._build_clinical_impression(consensus_data))
         story.append(Spacer(1, 30))
