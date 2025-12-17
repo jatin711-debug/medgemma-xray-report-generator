@@ -177,10 +177,6 @@ CONDITION_DETECTION_KEYWORDS = {
     "pneumonia": ["pneumonia", "consolidation", "infiltrate", "infection", "opacity consistent with infection"],
     "pneumothorax": ["pneumothorax", "collapsed lung", "air in pleural", "lung collapse"],
     "tuberculosis": ["tuberculosis", "tb", "tuberculous", "cavitary lesion", "miliary pattern"],
-    "effusion": ["effusion", "pleural fluid", "fluid collection", "blunting of costophrenic"],
-    "cardiomegaly": ["cardiomegaly", "enlarged heart", "cardiac enlargement", "increased cardiac silhouette"],
-    "nodule": ["nodule", "mass", "lesion", "tumor", "neoplasm"],
-    "atelectasis": ["atelectasis", "collapse", "volume loss"],
 }
 
 
@@ -213,6 +209,7 @@ class MedicalImageAnalyzer:
         self.max_image_size = 10 * 1024 * 1024  # 10MB
         self.allowed_extensions = {'.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.webp'}
         self.model_loaded = False
+        self._last_raw_heatmap: Optional[np.ndarray] = None  # Store raw heatmap for localization
         self.ensure_reports_directory()
         
     def ensure_reports_directory(self) -> None:
@@ -378,8 +375,7 @@ class MedicalImageAnalyzer:
         """
         Extract confidence scores for each medical condition from model text.
         
-        Parses the response text for confidence-indicating language and
-        condition-specific keywords to determine probability percentages.
+        Improved logic to properly distinguish between positive and negative findings.
         
         Args:
             raw_response: Raw text output from the AI model
@@ -391,7 +387,8 @@ class MedicalImageAnalyzer:
         confidences = {}
         
         for condition, keywords in CONDITION_DETECTION_KEYWORDS.items():
-            # Check if condition is mentioned
+            # Check if primary condition keyword is mentioned
+            primary_keyword = keywords[0]  # Main condition name
             condition_mentioned = any(kw in response_lower for kw in keywords)
             
             if not condition_mentioned:
@@ -399,32 +396,56 @@ class MedicalImageAnalyzer:
                 confidences[condition] = 0.05
                 continue
             
-            # Find the highest applicable confidence keyword
-            max_confidence = 0.50  # Default if mentioned but no confidence language
-            
-            # Look for negative indicators first
+            # More specific negative patterns - check for complete phrases
             negative_patterns = [
-                f"no {condition}", f"no evidence of {condition}", 
-                f"negative for {condition}", f"without {condition}",
-                f"not detected", f"ruled out"
+                f"no {primary_keyword}",
+                f"no evidence of {primary_keyword}",
+                f"negative for {primary_keyword}",
+                f"without {primary_keyword}",
+                f"{primary_keyword} not detected",
+                f"ruled out {primary_keyword}",
+                f"no signs of {primary_keyword}",
+                f"absence of {primary_keyword}"
             ]
             
-            is_negative = any(pattern in response_lower for pattern in negative_patterns)
+            # Check for explicit negative findings
+            is_explicitly_negative = any(pattern in response_lower for pattern in negative_patterns)
             
-            if is_negative:
-                # Negative finding - low probability
-                confidences[condition] = 0.08
+            if is_explicitly_negative:
+                # Confirmed negative finding
+                confidences[condition] = 0.06
                 continue
             
-            # Check for confidence keywords near condition keywords
+            # Look for positive confirmation keywords
+            positive_indicators = [
+                f"{primary_keyword} detected",
+                f"{primary_keyword} present",
+                f"findings consistent with {primary_keyword}",
+                f"suggestive of {primary_keyword}",
+                f"evidence of {primary_keyword}",
+            ]
+            
+            is_positive = any(indicator in response_lower for indicator in positive_indicators)
+            
+            # Determine base confidence
+            if is_positive:
+                max_confidence = 0.75  # High confidence for positive detection
+            else:
+                max_confidence = 0.50  # Moderate default when mentioned without clear indication
+            
+            # Refine confidence based on confidence keywords
             for conf_keyword, conf_score in CONFIDENCE_KEYWORDS.items():
                 if conf_keyword in response_lower:
-                    # Check if this confidence keyword is near a condition keyword
+                    # Check proximity to condition keywords (simple approach: same sentence/paragraph)
                     for cond_kw in keywords:
                         if cond_kw in response_lower:
-                            # Found both - use this confidence
-                            if conf_score > max_confidence:
-                                max_confidence = conf_score
+                            # Boost or reduce based on confidence keyword
+                            if conf_score > 0.5:  # High confidence keyword
+                                max_confidence = max(max_confidence, conf_score)
+                            else:  # Low confidence keyword  
+                                # Only lower if we haven't already detected positive indicators
+                                if not is_positive:
+                                    max_confidence = min(max_confidence, conf_score)
             
             confidences[condition] = max_confidence
         
@@ -535,8 +556,9 @@ class MedicalImageAnalyzer:
             else:
                 logger.warning("⚠️  Still no attentions found - will create placeholder maps")
 
-            # Generate heatmap
-            heatmap_image, _ = self._generate_heatmap_and_raw_normalized(attentions, image)
+            # Generate heatmap and store raw array for later use
+            heatmap_image, raw_heatmap_np = self._generate_heatmap_and_raw_normalized(attentions, image)
+            self._last_raw_heatmap = raw_heatmap_np  # Store for localization map
 
             findings = self.parse_ai_response_multi(raw_response)
             return raw_response, findings, heatmap_image
@@ -545,6 +567,7 @@ class MedicalImageAnalyzer:
             logger.error(f"Error during image analysis: {str(e)}", exc_info=True)
             # Return placeholders if analysis fails critically
             placeholder_img = self._create_placeholder_heatmap(image)
+            self._last_raw_heatmap = None  # Clear raw heatmap on error
             findings = RadiologyFindings(
                 anatomical_structures=["Error during analysis"],
                 abnormalities=[f"Error: {str(e)}"],

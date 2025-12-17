@@ -145,6 +145,7 @@ class MultiModelAnalyzer:
         medgemma_raw = ""
         medgemma_findings = None
         medgemma_heatmap = None
+        medgemma_raw_heatmap_np = None  # Store raw numpy array for localization
         medgemma_success = False
         
         nv_raw = ""
@@ -158,6 +159,15 @@ class MultiModelAnalyzer:
                 medgemma_raw, medgemma_findings, medgemma_heatmap = await self.medgemma.analyze_image(image)
                 medgemma_success = True
                 logger.info("MedGemma analysis completed successfully")
+                
+                # Extract raw heatmap array if the heatmap is actually an Image
+                # The localization map needs the raw numpy array, not the PIL Image
+                # We'll generate it from scratch using the internal method if available
+                if hasattr(self.medgemma, '_last_raw_heatmap'):
+                    medgemma_raw_heatmap_np = self.medgemma._last_raw_heatmap
+                    logger.info(f"Retrieved raw heatmap array: shape={medgemma_raw_heatmap_np.shape if medgemma_raw_heatmap_np is not None else 'None'}")
+                else:
+                    logger.warning("No raw heatmap array available from MedGemma")
             except Exception as e:
                 logger.error(f"MedGemma analysis failed: {e}")
         else:
@@ -215,9 +225,9 @@ class MultiModelAnalyzer:
         # Generate localization map with contours (Layer 2)
         localization_map = None
         detected_regions = []
-        if self.medgemma is not None and medgemma_heatmap is not None:
+        if self.medgemma is not None and medgemma_raw_heatmap_np is not None:
             localization_map, detected_regions = self.medgemma._generate_localization_map(
-                medgemma_heatmap, image
+                medgemma_raw_heatmap_np, image
             )
             logger.info(f"Generated localization map with {len(detected_regions)} regions")
         
