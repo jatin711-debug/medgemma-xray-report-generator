@@ -283,18 +283,19 @@ class MedGemmaGradCAM:
             
             if cam is None:
                 placeholder_img, placeholder_cam = self._create_placeholder(image)
-                return placeholder_img, placeholder_cam, []
+                return placeholder_img, placeholder_img, placeholder_cam, []
             
-            # Create clinical overlay with contours
-            heatmap_overlay, detected_regions = self._create_overlay(cam, image, condition)
+            # Create clinical overlay: returns (pure_heatmap, localization_map, regions)
+            pure_heatmap, localization_map, detected_regions = self._create_overlay(cam, image, condition)
             
             logger.info(f"✅ Generated clinical GradCAM for {condition}: {len(detected_regions)} regions")
-            return heatmap_overlay, cam, detected_regions
+            # Return: (AI Evidence Map, Localization Map, raw CAM, regions)
+            return pure_heatmap, localization_map, cam, detected_regions
             
         except Exception as e:
             logger.error(f"GradCAM generation failed: {e}", exc_info=True)
             placeholder_img, placeholder_cam = self._create_placeholder(image)
-            return placeholder_img, placeholder_cam, []
+            return placeholder_img, placeholder_img, placeholder_cam, []
     
     def _compute_condition_score(self, logits: torch.Tensor, condition: str) -> torch.Tensor:
         """
@@ -630,16 +631,19 @@ class MedGemmaGradCAM:
         alpha_mask = np.clip(alpha_mask * 0.35, 0, 0.35)  # Reduced max opacity
         alpha_3ch = np.stack([alpha_mask, alpha_mask, alpha_mask], axis=-1)
         
-        # Blend
-        blended = (alpha_3ch * heatmap + (1 - alpha_3ch) * original_np).astype(np.uint8)
+        # Blend to create PURE HEATMAP (no contours) for "AI Evidence Map"
+        pure_heatmap = (alpha_3ch * heatmap + (1 - alpha_3ch) * original_np).astype(np.uint8)
         
         # =====================================================
-        # STEP 7: Draw contours on blended image
+        # STEP 7: Create LOCALIZATION MAP with contours
         # =====================================================
+        # Copy the blended image for localization (with contours)
+        localization_map = pure_heatmap.copy()
+        
         for idx, region in enumerate(top_regions):
             contour = region["contour"]
             # Green contour for detected regions
-            cv2.drawContours(blended, [contour], -1, (0, 255, 0), 2)
+            cv2.drawContours(localization_map, [contour], -1, (0, 255, 0), 2)
             
             # Add region label (R1, R2, etc.)
             cx, cy = region["centroid"]
@@ -647,12 +651,13 @@ class MedGemmaGradCAM:
             
             # Draw label with background
             (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            cv2.rectangle(blended, (cx - 2, cy - lh - 4), (cx + lw + 4, cy + 4), (0, 0, 0), -1)
-            cv2.putText(blended, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.rectangle(localization_map, (cx - 2, cy - lh - 4), (cx + lw + 4, cy + 4), (0, 0, 0), -1)
+            cv2.putText(localization_map, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         
-        logger.info(f"Clinical CAM overlay: lung-masked, top-20%, {len(top_regions)} regions detected")
+        logger.info(f"Clinical CAM: lung-masked, top-20%, {len(top_regions)} regions")
         
-        return Image.fromarray(blended), top_regions
+        # Return BOTH images: pure heatmap for AI Evidence, localization with contours
+        return Image.fromarray(pure_heatmap), Image.fromarray(localization_map), top_regions
     
     def _get_anatomical_location(self, x: int, y: int, w: int, h: int) -> str:
         """Determine anatomical location from coordinates."""

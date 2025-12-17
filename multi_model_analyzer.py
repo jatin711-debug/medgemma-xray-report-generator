@@ -206,19 +206,21 @@ class MultiModelAnalyzer:
                     target_condition = "pneumonia"  # Default
                 
                 logger.info(f"🎯 Generating clinical GradCAM for: {target_condition}")
-                gradcam_heatmap, gradcam_raw, gradcam_regions = self.gradcam.generate_cam(image, target_condition)
+                # 4 returns: (ai_evidence_map, localization_map, raw_cam, regions)
+                gradcam_heatmap, gradcam_localization, gradcam_raw, gradcam_regions = self.gradcam.generate_cam(image, target_condition)
                 
                 if gradcam_heatmap is not None:
                     logger.info(f"✅ Clinical GradCAM: {len(gradcam_regions)} regions detected")
             except Exception as e:
                 logger.warning(f"GradCAM generation failed, falling back to attention: {e}")
                 gradcam_heatmap = None
+                gradcam_localization = None
                 gradcam_regions = []
         
         # Choose primary heatmap: GradCAM > Attention > Placeholder
         if gradcam_heatmap is not None:
-            primary_heatmap = gradcam_heatmap
-            logger.info("✅ Using GradCAM evidence map")
+            primary_heatmap = gradcam_heatmap  # Pure heatmap (no contours)
+            logger.info("✅ Using GradCAM AI Evidence Map")
             # Update raw heatmap for localization if available
             if gradcam_raw is not None:
                 medgemma_raw_heatmap_np = gradcam_raw
@@ -237,15 +239,15 @@ class MultiModelAnalyzer:
             saliency_map = primary_heatmap
         
         # Generate localization map
-        # If GradCAM already extracted regions, use those directly
+        # If GradCAM already extracted regions, use the separate localization image
         localization_map = None
         detected_regions = []
         
-        if gradcam_regions:
-            # GradCAM already extracted clinical regions
-            localization_map = primary_heatmap  # Use same heatmap (has contours drawn)
+        if gradcam_regions and gradcam_localization is not None:
+            # GradCAM already created localization map with contours
+            localization_map = gradcam_localization  # Separate image with contours
             detected_regions = gradcam_regions
-            logger.info(f"Using GradCAM regions for localization: {len(detected_regions)} regions")
+            logger.info(f"Using GradCAM localization map: {len(detected_regions)} regions")
         elif self.medgemma is not None and medgemma_raw_heatmap_np is not None:
             # Fallback to old localization method
             localization_map, detected_regions = self.medgemma._generate_localization_map(
