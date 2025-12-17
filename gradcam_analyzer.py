@@ -338,7 +338,17 @@ class MedGemmaGradCAM:
         return condition_score
     
     def _compute_gradcam(self) -> Optional[np.ndarray]:
-        """Compute GradCAM from stored activations and gradients."""
+        """
+        Compute clinical-grade GradCAM from stored activations and gradients.
+        
+        Following strict clinical requirements:
+        1. Gradient-weight the patch embeddings (not raw attention)
+        2. Aggregate across channels with proper weighting
+        3. Reshape to spatial grid
+        4. Apply spatial smoothing for regional output
+        5. Threshold top 25% activations
+        6. Output smooth, localized heatmap suitable for clinical reports
+        """
         try:
             # activations shape: (batch, num_patches, hidden_dim) for ViT
             # gradients shape: same as activations
@@ -348,39 +358,54 @@ class MedGemmaGradCAM:
             
             logger.info(f"Activations shape: {activations.shape}, Gradients shape: {gradients.shape}")
             
-            # Global average pooling of gradients (over the hidden dimension)
-            # This gives us the importance weights for each patch
-            weights = gradients.mean(dim=-1, keepdim=True)  # (batch, num_patches, 1)
+            # =====================================================
+            # STEP 1: Compute channel-wise importance weights
+            # Global average pooling of gradients over spatial dimension
+            # This gives importance weight per channel
+            # =====================================================
+            # Shape: (batch, hidden_dim) - importance per channel
+            alpha = gradients.mean(dim=1)  # Average over patches
             
-            # Weighted combination of activations
-            cam = (weights * activations).sum(dim=-1)  # (batch, num_patches)
+            # =====================================================
+            # STEP 2: Weighted combination of activations
+            # Weight each channel by its importance, then sum
+            # =====================================================
+            # activations: (batch, num_patches, hidden_dim)
+            # alpha: (batch, hidden_dim) -> expand to (batch, 1, hidden_dim)
+            weighted_activations = activations * alpha.unsqueeze(1)
             
-            # Apply ReLU (we only care about positive contributions)
+            # Sum across channels to get per-patch importance
+            cam = weighted_activations.sum(dim=-1)  # (batch, num_patches)
+            
+            # =====================================================
+            # STEP 3: Apply ReLU (only positive contributions)
+            # =====================================================
             cam = F.relu(cam)
             
-            # Take first batch element and reshape to grid
-            # Convert to float32 first (numpy doesn't support bfloat16)
+            # Take first batch element and convert to numpy
             cam = cam[0].cpu().float().numpy()  # (num_patches,)
             
-            # Determine grid size (sqrt of num_patches for square grid)
+            # =====================================================
+            # STEP 4: Reshape to spatial grid
+            # =====================================================
             num_patches = cam.shape[0]
-            
-            # Handle potential CLS token (first token)
-            # Most ViTs have 1 CLS token + grid_size^2 patch tokens
             sqrt_patches = int(np.sqrt(num_patches))
+            
+            # Handle CLS token if present
             if sqrt_patches * sqrt_patches == num_patches:
                 grid_size = sqrt_patches
-            elif (sqrt_patches) * (sqrt_patches) == num_patches - 1:
-                # Has CLS token, remove it
-                cam = cam[1:]
+            elif sqrt_patches * sqrt_patches == num_patches - 1:
+                cam = cam[1:]  # Remove CLS token
                 grid_size = sqrt_patches
             else:
-                # Try common grid sizes (including 64 for MedGemma's 4096 patches)
+                # Try common grid sizes
                 for gs in [14, 16, 24, 28, 32, 64]:
-                    if gs * gs == num_patches or gs * gs == num_patches - 1:
+                    if gs * gs == num_patches:
                         grid_size = gs
-                        if gs * gs == num_patches - 1:
-                            cam = cam[1:]
+                        break
+                    elif gs * gs == num_patches - 1:
+                        cam = cam[1:]
+                        grid_size = gs
                         break
                 else:
                     logger.warning(f"Cannot reshape {num_patches} patches to square grid")
@@ -388,38 +413,82 @@ class MedGemmaGradCAM:
             
             cam = cam.reshape(grid_size, grid_size)
             
-            # Normalize to [0, 1]
+            # =====================================================
+            # STEP 5: Spatial smoothing for regional output
+            # Use Gaussian blur to create smooth, non-speckled heatmap
+            # =====================================================
+            # Normalize first
             if cam.max() > cam.min():
                 cam = (cam - cam.min()) / (cam.max() - cam.min())
             else:
                 cam = np.zeros_like(cam)
             
-            logger.info(f"GradCAM computed: {grid_size}x{grid_size}, range [{cam.min():.3f}, {cam.max():.3f}]")
+            # Apply Gaussian smoothing (kernel size relative to grid)
+            kernel_size = max(3, grid_size // 8)
+            if kernel_size % 2 == 0:
+                kernel_size += 1  # Must be odd
+            cam_smoothed = cv2.GaussianBlur(cam.astype(np.float32), (kernel_size, kernel_size), 0)
             
-            return cam
+            # =====================================================
+            # STEP 6: Threshold top 25% activations
+            # Zero out low activations for clean clinical output
+            # =====================================================
+            threshold = np.percentile(cam_smoothed, 75)  # Keep top 25%
+            cam_thresholded = np.where(cam_smoothed >= threshold, cam_smoothed, 0)
+            
+            # Re-normalize after thresholding
+            if cam_thresholded.max() > 0:
+                cam_final = cam_thresholded / cam_thresholded.max()
+            else:
+                cam_final = cam_smoothed  # Fallback to smoothed if all zeros
+            
+            logger.info(f"GradCAM computed: {grid_size}x{grid_size}, "
+                       f"smoothed (kernel={kernel_size}), threshold@75%, "
+                       f"range [{cam_final.min():.3f}, {cam_final.max():.3f}]")
+            
+            return cam_final
             
         except Exception as e:
             logger.error(f"GradCAM computation failed: {e}", exc_info=True)
             return None
     
     def _create_overlay(self, cam: np.ndarray, original_image: Image.Image) -> Image.Image:
-        """Create a visualization overlay of GradCAM on the original image."""
+        """
+        Create clinical-grade visualization overlay.
+        
+        Uses smooth interpolation and professional colormap for
+        medical report quality output.
+        """
         # Convert to numpy
         original_np = np.array(original_image.convert('RGB'))
         h, w = original_np.shape[:2]
         
-        # Resize CAM to image size
+        # Resize CAM to image size with smooth interpolation
         cam_resized = cv2.resize(cam, (w, h), interpolation=cv2.INTER_CUBIC)
         
-        # Apply colormap (JET for medical imaging)
+        # Additional smoothing at full resolution for ultra-smooth output
+        smooth_kernel = max(15, min(w, h) // 30)
+        if smooth_kernel % 2 == 0:
+            smooth_kernel += 1
+        cam_resized = cv2.GaussianBlur(cam_resized, (smooth_kernel, smooth_kernel), 0)
+        
+        # Re-normalize after smoothing
+        if cam_resized.max() > cam_resized.min():
+            cam_resized = (cam_resized - cam_resized.min()) / (cam_resized.max() - cam_resized.min())
+        
+        # Apply colormap (JET for medical imaging - blue=low, red=high)
         cam_uint8 = np.uint8(255 * cam_resized)
         heatmap = cv2.applyColorMap(cam_uint8, cv2.COLORMAP_JET)
         heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
         
-        # Blend with original
-        alpha = 0.4
-        blended = (1 - alpha) * original_np + alpha * heatmap
-        blended = np.clip(blended, 0, 255).astype(np.uint8)
+        # Create alpha mask based on activation intensity
+        # Low activation areas will be more transparent
+        alpha_mask = cam_resized ** 0.5  # Square root for more visible mid-range
+        alpha_mask = np.clip(alpha_mask * 0.7, 0, 0.7)  # Max 70% opacity
+        alpha_3ch = np.stack([alpha_mask, alpha_mask, alpha_mask], axis=-1)
+        
+        # Blend with variable alpha per pixel
+        blended = (alpha_3ch * heatmap + (1 - alpha_3ch) * original_np).astype(np.uint8)
         
         return Image.fromarray(blended)
     

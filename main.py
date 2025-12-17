@@ -850,8 +850,8 @@ class MedicalImageAnalyzer:
         self, 
         heatmap_raw: np.ndarray, 
         original_image: Image.Image,
-        threshold_percentile: int = 80,
-        min_contour_area: int = 500,
+        threshold_percentile: int = 60,  # Lowered from 80 to detect more regions
+        min_contour_area: int = 200,     # Lowered from 500 for smaller regions
         contour_color: Tuple[int, int, int] = (0, 255, 0),  # Green
         contour_thickness: int = 2
     ) -> Tuple[Image.Image, List[Dict[str, Any]]]:
@@ -934,8 +934,8 @@ class MedicalImageAnalyzer:
                 cv2.drawContours(mask, [contour], -1, 255, -1)
                 region_intensity = cv2.mean(heatmap_uint8, mask=mask)[0] / 255.0
                 
-                # Filter: Only keep regions with >25% attention (adjusted for typical heatmap values)
-                if region_intensity <= 0.25:
+                # Filter: Only keep regions with >15% attention (lowered from 25%)
+                if region_intensity <= 0.15:
                     continue
                 
                 # Determine anatomical location based on position
