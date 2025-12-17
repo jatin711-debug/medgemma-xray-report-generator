@@ -1644,15 +1644,35 @@ async def analyze_and_generate_report(
     if not file.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="File must be an image")
     
-    # Perform analysis once - this includes heatmap generation
-    analysis_response, original_image, heatmap_image = await analyzer.analyze_image_from_upload(file)
+    # Perform analysis with Multi-Model Analyzer (supports GradCAM)
+    (analysis_response, original_image, heatmap_image, saliency_map, probability_map, 
+     segmentation_map, localization_map, detected_regions, condition_confidences) = \
+        await multi_analyzer.analyze_image_from_upload(file)
     
-    # Generate PDF in thread pool to avoid blocking the event loop
+    # helper to unpack consensus for report generator
+    consensus = analysis_response.consensus
+    consensus_data = {
+        'medgemma_raw': consensus.medgemma_raw,
+        'medgemma_confidence': consensus.medgemma_confidence,
+        'clinical_impression': consensus.clinical_impression,
+        'all_abnormalities': consensus.all_abnormalities,
+        'medgemma_abnormalities': consensus.medgemma_abnormalities,
+    }
+    
+    primary_condition = getattr(analysis_response, 'primary_condition', "Pneumonia")
+
+    # Generate PDF in thread pool using the updated generate_report method
     pdf_path = await run_in_threadpool(
-        pdf_generator.generate_pdf_report,
+        pdf_generator.generate_report,
         analysis_response,
         original_image,
-        heatmap_image
+        heatmap_image,
+        consensus_data,
+        saliency_map,
+        localization_map,
+        detected_regions,
+        condition_confidences,
+        primary_condition
     )
     
     return PDFGenerationResponse(

@@ -45,6 +45,7 @@ class MultiModelAnalysisResponse(BaseModel):
     timestamp: str = Field(description="Analysis timestamp")
     consensus: ConsensusFindings
     image_metadata: Dict[str, Any] = Field(default_factory=dict)
+    primary_condition: str = Field(default="Pneumonia", description="Primary condition analyzed for evidence map")
     
     # Model status
     medgemma_success: bool = Field(default=False)
@@ -195,16 +196,16 @@ class MultiModelAnalyzer:
         gradcam_raw = None
         gradcam_regions = []
         
+        # Determine target condition for evidence map
+        target_condition = "pneumonia"  # Default
+        if condition_confidences:
+            # Use the highest-confidence condition
+            top_condition = max(condition_confidences.items(), key=lambda x: x[1])
+            target_condition = top_condition[0]
+        
         # Try GradCAM first (condition-specific evidence map)
         if self.gradcam is not None and medgemma_success:
             try:
-                # Use the highest-confidence condition for GradCAM
-                if condition_confidences:
-                    top_condition = max(condition_confidences.items(), key=lambda x: x[1])
-                    target_condition = top_condition[0]
-                else:
-                    target_condition = "pneumonia"  # Default
-                
                 logger.info(f"🎯 Generating clinical GradCAM for: {target_condition}")
                 # 4 returns: (ai_evidence_map, localization_map, raw_cam, regions)
                 gradcam_heatmap, gradcam_localization, gradcam_raw, gradcam_regions = self.gradcam.generate_cam(image, target_condition)
@@ -267,7 +268,8 @@ class MultiModelAnalyzer:
                 "mode": image.mode,
                 "format": getattr(image, 'format', 'unknown')
             },
-            medgemma_success=medgemma_success
+            medgemma_success=medgemma_success,
+            primary_condition=target_condition
         )
         
         return (response, image, primary_heatmap, saliency_map, probability_map, 

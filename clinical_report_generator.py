@@ -576,7 +576,8 @@ class ClinicalReportGenerator:
         return image_table
     
     def _build_localization_section(self, localization_map: Image.Image,
-                                     detected_regions: List[Dict]) -> List:
+                                     detected_regions: List[Dict],
+                                     condition: str = "Conditions") -> List:
         """Build lesion localization section with map and legend."""
         elements = []
         
@@ -590,10 +591,15 @@ class ClinicalReportGenerator:
         if detected_regions:
             legend_items = []
             for i, region in enumerate(detected_regions[:5], 1):
-                evidence_score = int(region.get('attention_score', 0) * 100)
-                location = region.get('location', 'Unknown')
+                evidence_score = region.get('evidence_score', region.get('intensity', 0))
+                score_display = f"{int(evidence_score * 100)}%"
+                
+                # Use qualitative label if available (Primary/Secondary)
+                conf_label = region.get('label', f"Region {i}")
+                location = region.get('location', 'Unknown Location')
+                
                 legend_items.append(
-                    f"<b>R{i}:</b> {location} — Relative AI evidence: {evidence_score}%"
+                    f"<b>{conf_label}:</b> {location} — Evidence Strength: {score_display}"
                 )
             legend_text = "<br/>".join(legend_items)
         else:
@@ -630,7 +636,7 @@ class ClinicalReportGenerator:
         
         elements.append(main_row)
         elements.append(Spacer(1, 10))
-        elements.append(Paragraph("AI Evidence Localization Map", self.styles['caption']))
+        elements.append(Paragraph(f"AI Evidence Localization Map ({condition})", self.styles['caption']))
         
         return elements
     
@@ -662,8 +668,16 @@ class ClinicalReportGenerator:
                 status = "CLEAR"
                 status_color = "#10B981"
             
-            # Progress bar
-            bar = ProgressBar(pct, width=180, height=18)
+            # Determine qualitative stability
+            if pct >= 90:
+                stability = "High Stability"
+            elif pct >= 70:
+                stability = "Moderate Stability"
+            else:
+                stability = "Screening Only"
+
+            # Progress bar with qualitative label instead of percentage
+            bar = ProgressBar(pct, width=180, height=18, label=stability, show_percentage=False)
             
             prob_rows.append([
                 Paragraph(f"<b>{cond_display}</b>", self.styles['body']),
@@ -690,7 +704,8 @@ class ClinicalReportGenerator:
         return elements
     
     def _build_condition_cards(self, condition_confidences: Dict,
-                                abnormalities: List) -> Table:
+                                abnormalities: List,
+                                primary_condition: str = "Pneumonia") -> Table:
         """Build condition screening cards."""
         
         conditions = [
@@ -716,7 +731,11 @@ class ClinicalReportGenerator:
         # NOTE: Keys must match those in multi_model_analyzer.py condition_confidences
         for cond_name, cond_key in conditions:
             confidence = condition_confidences.get(cond_key, 0) if condition_confidences else 0
-            detected = confidence >= 0.7
+            
+            # Clinical Requirement: Only report condition if AI Evidence Map fits (primary_condition)
+            # Otherwise downgrade to negative/screened
+            detected = (confidence >= 0.7) and (cond_key == primary_condition)
+            
             model_detected = is_detected(abnormalities, cond_key)
             
             if detected:
@@ -884,7 +903,8 @@ class ClinicalReportGenerator:
         density_saliency_image: Optional[Image.Image] = None,
         localization_map: Optional[Image.Image] = None,
         detected_regions: Optional[List[Dict[str, Any]]] = None,
-        condition_confidences: Optional[Dict[str, float]] = None
+        condition_confidences: Optional[Dict[str, float]] = None,
+        primary_condition: str = "Pneumonia"
     ) -> str:
         """
         Generate clinical-grade PDF report.
@@ -991,11 +1011,14 @@ class ClinicalReportGenerator:
         # =====================================================================
         # PAGE 2: IMAGING ANALYSIS (Side-by-side)
         # =====================================================================
+        # Format caption matching requirement: "AI Evidence Map (Pneumonia – CAM-based)"
+        evidence_caption = f"AI Evidence Map ({primary_condition} – CAM-based)"
+        
         story.append(Paragraph("IMAGING ANALYSIS", self.styles['section_title']))
         story.append(Spacer(1, 10))
         story.append(self._build_side_by_side_images(
             original_image, heatmap_image,
-            "Original Radiograph", "AI Evidence Map"
+            "Original Radiograph", evidence_caption
         ))
         story.append(Spacer(1, 15))
         story.append(Paragraph(
@@ -1011,7 +1034,8 @@ class ClinicalReportGenerator:
         if localization_map is not None:
             story.append(Paragraph("LESION LOCALIZATION", self.styles['section_title']))
             story.append(Spacer(1, 10))
-            story.extend(self._build_localization_section(localization_map, detected_regions or []))
+            # Pass condition to localization section builder
+            story.extend(self._build_localization_section(localization_map, detected_regions or [], condition=primary_condition))
             story.append(Spacer(1, 25))
         
         # NOTE: Density visualization removed from main clinical report
@@ -1030,7 +1054,7 @@ class ClinicalReportGenerator:
         
         story.append(Paragraph("CONDITION SCREENING", self.styles['section_title']))
         story.append(Spacer(1, 10))
-        story.append(self._build_condition_cards(condition_confidences, abnormalities))
+        story.append(self._build_condition_cards(condition_confidences, abnormalities, primary_condition))
         
         story.append(PageBreak())
         
