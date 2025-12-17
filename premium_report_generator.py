@@ -289,9 +289,10 @@ class PremiumReportGenerator:
         analysis_response,
         original_image: Image.Image,
         heatmap_image: Image.Image,
-        consensus_data: Optional[Dict[str, Any]] = None
+        consensus_data: Optional[Dict[str, Any]] = None,
+        density_saliency_image: Optional[Image.Image] = None
     ) -> str:
-        """Generate premium DeepMind-style PDF report."""
+        """Generate premium DeepMind-style PDF report with optional density saliency map."""
         
         filename = f"sentryai_medical_report_{analysis_response.analysis_id}.pdf"
         filepath = os.path.join(self.reports_dir, filename)
@@ -348,7 +349,29 @@ class PremiumReportGenerator:
             ('BOTTOMPADDING', (0, 0), (-1, -1), 15),
         ]))
         story.append(image_row)
-        story.append(Spacer(1, 20))
+        story.append(Spacer(1, 15))
+        
+        # === DENSITY SALIENCY MAP (if available) ===
+        if density_saliency_image is not None:
+            rl_density = self._pil_to_reportlab(density_saliency_image, img_width * 1.5, enhance=True)
+            
+            density_row = Table(
+                [[rl_density],
+                 [Paragraph("Opacity-based Density Map (tissue density visualization)", self.styles['caption'])]],
+                colWidths=[img_width * 1.5 + 0.2*inch]
+            )
+            density_row.setStyle(TableStyle([
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, 0), 'BOTTOM'),
+                ('BACKGROUND', (0, 0), (-1, -1), self.colors['card_bg']),
+                ('BOX', (0, 0), (-1, -1), 1, self.colors['card_border']),
+                ('TOPPADDING', (0, 0), (-1, -1), 12),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+            ]))
+            story.append(density_row)
+            story.append(Spacer(1, 20))
+        else:
+            story.append(Spacer(1, 5))
         
         # === DETECTION CARDS ===
         story.append(Paragraph("CONDITION SCREENING", self.styles['section_title']))

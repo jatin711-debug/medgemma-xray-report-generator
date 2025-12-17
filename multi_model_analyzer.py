@@ -205,9 +205,13 @@ class MultiModelAnalyzer:
             logger.warning("No verified heatmap available, using placeholder")
         
         # Generate additional visualization maps
-        # For now, we return the primary heatmap for all map types
-        # The PDF generator will use these appropriately
-        saliency_map = primary_heatmap  # Can be enhanced with gradient-based methods
+        # Saliency map: Use density-based visualization (model-free, shows X-ray density)
+        if self.medgemma is not None:
+            saliency_map = self.medgemma._generate_density_saliency_map(image)
+            logger.info("Generated density-based saliency map (model-free)")
+        else:
+            saliency_map = primary_heatmap
+            
         probability_map = primary_heatmap
         segmentation_map = primary_heatmap
         

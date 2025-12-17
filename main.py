@@ -669,6 +669,74 @@ class MedicalImageAnalyzer:
             logger.error(f"Error generating new saliency map: {e}", exc_info=True)
             return fallback_image
 
+    def _generate_density_saliency_map(self, original_image: Image.Image, 
+                                        gaussian_kernel: int = 25,
+                                        overlay_alpha: float = 0.6) -> Image.Image:
+        """
+        Generates an opacity-based saliency heatmap that highlights X-ray density patterns.
+        
+        This is a MODEL-FREE visualization that shows:
+        - Where the image is denser (bones, heart, opacities) → warmer colors (red/yellow)
+        - Where the image has more air (lung fields) → cooler colors (blue)
+        
+        Pipeline:
+        1. Convert to grayscale
+        2. Apply Gaussian smoothing (removes high-frequency noise)
+        3. Normalize intensity (brighter = higher attenuation)
+        4. Apply JET colormap
+        5. Overlay on original with variable alpha
+        
+        Args:
+            original_image: The chest X-ray image
+            gaussian_kernel: Size of Gaussian blur kernel (must be odd)
+            overlay_alpha: Max alpha for the overlay (0-1)
+            
+        Returns:
+            PIL Image with density saliency overlay
+        """
+        try:
+            # Convert to grayscale numpy array
+            gray_np = np.array(original_image.convert("L"), dtype=np.float32)
+            
+            # Apply Gaussian smoothing to remove noise and keep large-scale patterns
+            if gaussian_kernel % 2 == 0:
+                gaussian_kernel += 1  # Ensure odd
+            smoothed = cv2.GaussianBlur(gray_np, (gaussian_kernel, gaussian_kernel), 0)
+            
+            # Normalize to 0-255 range
+            # Higher values in X-ray = more attenuation = denser tissue
+            min_val, max_val = smoothed.min(), smoothed.max()
+            if max_val > min_val:
+                normalized = ((smoothed - min_val) / (max_val - min_val) * 255).astype(np.uint8)
+            else:
+                normalized = np.zeros_like(smoothed, dtype=np.uint8)
+            
+            # Apply JET colormap (blue=low density, red=high density)
+            heatmap_colored = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
+            
+            # Convert original to BGR for blending
+            original_bgr = cv2.cvtColor(np.array(original_image.convert("RGB")), cv2.COLOR_RGB2BGR)
+            
+            # Create alpha mask based on intensity (denser areas more visible)
+            alpha_mask = normalized.astype(np.float32) / 255.0
+            alpha_mask = alpha_mask * overlay_alpha
+            
+            # Expand to 3 channels
+            alpha_3ch = np.stack([alpha_mask, alpha_mask, alpha_mask], axis=-1)
+            
+            # Blend with variable alpha
+            blended = (alpha_3ch * heatmap_colored + (1 - alpha_3ch) * original_bgr).astype(np.uint8)
+            
+            # Convert back to PIL RGB
+            result = Image.fromarray(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB))
+            
+            logger.info(f"Generated density saliency map (kernel={gaussian_kernel}, alpha={overlay_alpha})")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error generating density saliency map: {e}", exc_info=True)
+            return original_image.convert("RGB")
+
     def _generate_probability_map(self, heatmap_normalized_np: Optional[np.ndarray], original_image: Image.Image) -> Image.Image:
         """
         Generates a probability map visualizing normalized heatmap values as grayscale intensities.
@@ -1389,7 +1457,8 @@ async def analyze_url_and_generate_report(
         adapter_response,
         original_image,
         heatmap,
-        consensus_data  # Pass full consensus data
+        consensus_data,  # Pass full consensus data
+        saliency  # Pass density saliency map
     )
     
     # LOCAL TESTING MODE: Skip S3 upload and database storage
