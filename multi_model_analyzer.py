@@ -144,7 +144,7 @@ class MultiModelAnalyzer:
         # Extract condition confidences first (needed for GradCAM)
         condition_confidences = {}
         if consensus:
-            abnormalities_lower = [a.lower() for a in consensus.all_abnormalities]
+            abnormalities_text = consensus.all_abnormalities
             
             TRACKED_CONDITIONS = {
                 "pneumonia": ["pneumonia", "consolidation", "infiltrate"],
@@ -152,13 +152,28 @@ class MultiModelAnalyzer:
                 "tuberculosis": ["tuberculosis", "tb"],
             }
             
+            # Negative indicators - if present with keyword, it's NOT detected
+            NEGATIVE_PHRASES = ["no evidence", "not detected", "no sign", "negative for", 
+                               "absent", "no ", "without", "unremarkable", "clear"]
+            
+            def is_condition_detected(abnorm_list, keywords):
+                """Check if condition is positively detected (not negated)."""
+                for abnorm in abnorm_list:
+                    abnorm_lower = abnorm.lower()
+                    
+                    for keyword in keywords:
+                        if keyword in abnorm_lower:
+                            # Check if this is a NEGATIVE mention
+                            is_negative = any(neg in abnorm_lower for neg in NEGATIVE_PHRASES)
+                            if not is_negative:
+                                return True
+                return False
+            
             for condition_name, keywords in TRACKED_CONDITIONS.items():
-                detected = any(
-                    any(keyword in abnormality for keyword in keywords)
-                    for abnormality in abnormalities_lower
-                )
+                detected = is_condition_detected(abnormalities_text, keywords)
                 condition_confidences[condition_name] = 0.75 if detected else 0.08
             
+            logger.info(f"Abnormalities: {abnormalities_text}")
             logger.info(f"Extracted condition confidences: {condition_confidences}")
         
         # =========================================================================
