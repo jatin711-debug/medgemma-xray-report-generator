@@ -125,7 +125,10 @@ class MedGemmaGradCAM:
         layer_path = None
         
         # Try different layer access patterns
+        # For MedGemma: vision_tower.vision_model.encoder.layers[-1]
         layer_paths = [
+            ('vision_model.encoder.layers', lambda e: e.vision_model.encoder.layers[-1]),
+            ('vision_model.encoder.blocks', lambda e: e.vision_model.encoder.blocks[-1]),
             ('encoder.layers', lambda e: e.encoder.layers[-1]),
             ('encoder.blocks', lambda e: e.encoder.blocks[-1]),
             ('layers', lambda e: e.layers[-1]),
