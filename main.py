@@ -603,12 +603,12 @@ class MedicalImageAnalyzer:
             try:
                 # Try to get actual values from processor if available
                 image_size_proc = self.processor.image_processor.size.get('height', 896)
-                patch_size_proc = getattr(self.processor.image_processor, 'patch_size', 56)
+                patch_size_proc = getattr(self.processor.image_processor, 'patch_size', 14)  # MedGemma uses 14-pixel patches
                 grid_size = image_size_proc // patch_size_proc
                 num_image_patches = grid_size * grid_size
                 logger.info(f"Processor config: image_size={image_size_proc}, patch_size={patch_size_proc}, grid={grid_size}x{grid_size}")
             except Exception as e_proc:
-                logger.warning(f"Could not get SigLIP config ({e_proc}), using MedGemma defaults: 16x16=256 tokens")
+                logger.warning(f"Could not get SigLIP config ({e_proc}), using MedGemma defaults: 64x64=4096 tokens")
                 grid_size = GRID_SIZE
                 num_image_patches = NUM_IMAGE_TOKENS
             
