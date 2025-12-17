@@ -696,7 +696,7 @@ class ClinicalReportGenerator:
         conditions = [
             ('Pneumonia', 'pneumonia'),
             ('Pneumothorax', 'pneumothorax'),
-            ('Tuberculosis', 'tb'),
+            ('Tuberculosis', 'tuberculosis'),  # Key must match condition_confidences
         ]
         
         def is_detected(abnorm_list: List, key: str) -> bool:
@@ -713,6 +713,7 @@ class ClinicalReportGenerator:
         cards = []
         card_width = (self.CONTENT_WIDTH - 30) / 3
         
+        # NOTE: Keys must match those in multi_model_analyzer.py condition_confidences
         for cond_name, cond_key in conditions:
             confidence = condition_confidences.get(cond_key, 0) if condition_confidences else 0
             detected = confidence >= 0.7

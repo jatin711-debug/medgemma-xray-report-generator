@@ -126,6 +126,18 @@ class MultiModelAnalyzer:
                 medgemma_success = True
                 logger.info("MedGemma analysis completed successfully")
                 
+                # 🔍 Log what MedGemma outputs
+                logger.info("=" * 60)
+                logger.info("📋 MEDGEMMA RAW OUTPUT:")
+                logger.info(f"{medgemma_raw[:500]}..." if len(medgemma_raw) > 500 else medgemma_raw)
+                logger.info("-" * 40)
+                if medgemma_findings:
+                    logger.info(f"📊 PARSED FINDINGS:")
+                    logger.info(f"   Abnormalities: {medgemma_findings.abnormalities}")
+                    logger.info(f"   Confidence: {medgemma_findings.confidence_level}")
+                    logger.info(f"   Impression: {medgemma_findings.impression}")
+                logger.info("=" * 60)
+                
                 # Get raw heatmap for localization
                 if hasattr(self.medgemma, '_last_raw_heatmap'):
                     medgemma_raw_heatmap_np = self.medgemma._last_raw_heatmap

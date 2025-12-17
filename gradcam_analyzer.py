@@ -228,10 +228,15 @@ class MedGemmaGradCAM:
             if image.mode != 'RGB':
                 image = image.convert('RGB')
             
+            # Build messages with image reference
             messages = [
-                {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}
+                {"role": "user", "content": [
+                    {"type": "image", "image": image}, 
+                    {"type": "text", "text": prompt}
+                ]}
             ]
             
+            # Process inputs - pass image directly to apply_chat_template
             inputs = self.processor.apply_chat_template(
                 messages,
                 add_generation_prompt=True,
@@ -240,9 +245,13 @@ class MedGemmaGradCAM:
                 return_tensors="pt"
             ).to(self.device)
             
-            # Add the image
-            pixel_values = self.processor.image_processor(image, return_tensors="pt")['pixel_values']
-            inputs['pixel_values'] = pixel_values.to(self.device, dtype=self.model.dtype)
+            # Convert pixel_values to correct dtype
+            if 'pixel_values' in inputs:
+                inputs['pixel_values'] = inputs['pixel_values'].to(dtype=self.model.dtype)
+            else:
+                # Fallback: manually add pixel_values if not included
+                pixel_values = self.processor.image_processor(image, return_tensors="pt")['pixel_values']
+                inputs['pixel_values'] = pixel_values.to(self.device, dtype=self.model.dtype)
             
             # Enable gradient computation
             self.model.eval()
