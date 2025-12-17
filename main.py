@@ -342,8 +342,10 @@ class MedicalImageAnalyzer:
         await self.load_model()
 
         try:
-            # Resize image to match model input expectations (usually 224x224)
-            image_for_model = image.resize((224, 224))
+            # MedGemma 4B expects 896x896 resolution, encoded to 256 tokens via SigLIP
+            # See: https://huggingface.co/google/medgemma-4b-it
+            MEDGEMMA_IMAGE_SIZE = 896
+            image_for_model = image.resize((MEDGEMMA_IMAGE_SIZE, MEDGEMMA_IMAGE_SIZE))
 
             messages = [
                 {
@@ -478,15 +480,22 @@ class MedicalImageAnalyzer:
             avg_attentions = stacked_attentions.mean(dim=(0, 2))
             attention_map_tensor = avg_attentions.squeeze(0).cpu().detach()
 
+            # MedGemma 4B uses SigLIP encoder: 896x896 -> 256 tokens (16x16 grid)
+            # Reference: https://www.kaggle.com/code/huseyincavus/medgemma-attention-values
+            NUM_IMAGE_TOKENS = 256
+            GRID_SIZE = 16
+            
             try:
-                image_size_proc = self.processor.image_processor.size['height']
-                patch_size_proc = self.processor.image_processor.patch_size
+                # Try to get actual values from processor if available
+                image_size_proc = self.processor.image_processor.size.get('height', 896)
+                patch_size_proc = getattr(self.processor.image_processor, 'patch_size', 56)
                 grid_size = image_size_proc // patch_size_proc
                 num_image_patches = grid_size * grid_size
+                logger.info(f"Processor config: image_size={image_size_proc}, patch_size={patch_size_proc}, grid={grid_size}x{grid_size}")
             except Exception as e_proc:
-                logger.warning(f"Could not get SigLIP config from processor ({e_proc}), using defaults.")
-                grid_size = 14
-                num_image_patches = grid_size * grid_size
+                logger.warning(f"Could not get SigLIP config ({e_proc}), using MedGemma defaults: 16x16=256 tokens")
+                grid_size = GRID_SIZE
+                num_image_patches = NUM_IMAGE_TOKENS
             
             seq_len = attention_map_tensor.shape[0]
             # Ensure num_text_tokens is calculated correctly based on actual sequence length from model
@@ -801,8 +810,10 @@ class MedicalImageAnalyzer:
             return fallback_image # Return a copy of the original image on error
 
     # --- Constants for heatmap overlay ---
-    _HEATMAP_THRESHOLD_PERCENTILE = 95
-    _GAUSSIAN_BLUR_KERNEL_SIZE = (25, 25) # Must be odd numbers
+    # Reduced from 95 to preserve more attention signal
+    _HEATMAP_THRESHOLD_PERCENTILE = 70
+    # Reduced from (25,25) to preserve more spatial detail  
+    _GAUSSIAN_BLUR_KERNEL_SIZE = (11, 11) # Must be odd numbers
     _HEATMAP_OVERLAY_ALPHA = 0.5 # Blending factor for the heatmap
 
     def _create_heatmap_overlay(self, heatmap_raw_np: Optional[np.ndarray], original_image: Image.Image, is_placeholder: bool = False) -> Image.Image:

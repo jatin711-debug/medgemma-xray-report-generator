@@ -81,6 +81,42 @@ ANATOMICAL_ZONES = {
     "perihilar": (0.25, 0.25, 0.75, 0.55),
 }
 
+# Synonyms for location matching - maps common variations to canonical zone names
+LOCATION_SYNONYMS = {
+    # Right lung zones
+    "right upper lobe": "right upper",
+    "rul": "right upper",
+    "right upper zone": "right upper",
+    "right middle lobe": "right middle",
+    "rml": "right middle",
+    "right lower lobe": "right lower",
+    "rll": "right lower",
+    "right lower zone": "right lower",
+    "right base": "right lower",
+    "right basal": "right lower",
+    
+    # Left lung zones
+    "left upper lobe": "left upper",
+    "lul": "left upper",
+    "left upper zone": "left upper",
+    "lingula": "left middle",
+    "left middle lobe": "left middle",
+    "left lower lobe": "left lower",
+    "lll": "left lower",
+    "left lower zone": "left lower",
+    "left base": "left lower",
+    "left basal": "left lower",
+    
+    # General terms
+    "both lungs": "bilateral",
+    "widespread": "diffuse",
+    "throughout": "diffuse",
+    "patchy": "diffuse",
+    "central": "perihilar",
+    "hilum": "hilar",
+    "hila": "bilateral hilar",
+}
+
 
 class NVReasonCXRAnalyzer:
     """
@@ -100,9 +136,9 @@ class NVReasonCXRAnalyzer:
         self.model: Optional[Any] = None
         self.model_loaded = False
         
-        # Heatmap generation settings
-        self._HEATMAP_THRESHOLD_PERCENTILE = 95
-        self._GAUSSIAN_BLUR_KERNEL_SIZE = (25, 25)
+        # Heatmap generation settings - reduced from aggressive values
+        self._HEATMAP_THRESHOLD_PERCENTILE = 95  # Not used directly but for reference
+        self._GAUSSIAN_BLUR_KERNEL_SIZE = (11, 11)  # Reduced from (25,25)
         self._HEATMAP_OVERLAY_ALPHA = 0.5
     
     def get_system_memory_info(self) -> str:
@@ -245,20 +281,33 @@ class NVReasonCXRAnalyzer:
             
             # Parse anatomical locations from response
             locations = []
+            combined_text = (answer_lower + " " + raw_response.lower())
+            
+            # First, check for synonyms and map them to canonical zone names
+            for synonym, canonical_zone in LOCATION_SYNONYMS.items():
+                if synonym in combined_text:
+                    if canonical_zone not in locations:
+                        locations.append(canonical_zone)
+            
+            # Then check for direct zone name matches
             for zone_name in ANATOMICAL_ZONES.keys():
-                if zone_name in answer_lower or zone_name in raw_response.lower():
+                if zone_name in combined_text and zone_name not in locations:
                     locations.append(zone_name)
             
             # Also look for LOCATION: patterns from our prompt format
-            location_matches = re.findall(r'LOCATION:\s*([^|]+)', raw_response, re.IGNORECASE)
+            location_matches = re.findall(r'LOCATION:\s*([^|\n]+)', raw_response, re.IGNORECASE)
             for loc in location_matches:
                 loc_clean = loc.strip().lower()
+                # Check synonyms first
+                for synonym, canonical_zone in LOCATION_SYNONYMS.items():
+                    if synonym in loc_clean and canonical_zone not in locations:
+                        locations.append(canonical_zone)
+                # Then check zone names
                 for zone_name in ANATOMICAL_ZONES.keys():
-                    if zone_name in loc_clean:
-                        if zone_name not in locations:
-                            locations.append(zone_name)
+                    if zone_name in loc_clean and zone_name not in locations:
+                        locations.append(zone_name)
             
-            logger.info(f"Parsed locations: {locations}")
+            logger.info(f"Parsed {len(locations)} locations: {locations}")
             
         except Exception as e:
             logger.error(f"Error parsing NV-Reason structured response: {e}")
@@ -420,21 +469,32 @@ Be conservative - only mark as DETECTED if you have clear evidence."""
             avg_attention = stacked.mean(dim=(0, 2))  # (batch, seq_len, seq_len)
             attention_map = avg_attention.squeeze(0).cpu().detach()  # (seq_len, seq_len)
             
-            # For Qwen2.5-VL, try to estimate image token positions
-            # The model typically uses 14x14 or similar patch grid
+            # For Qwen2.5-VL, try to detect image token count from processor
+            # Common configurations: 14x14=196, 16x16=256, 24x24=576, 28x28=784
             seq_len = attention_map.shape[0]
+            logger.info(f"NV-Reason attention seq_len: {seq_len}")
             
-            # Heuristic: image tokens are usually in a contiguous block
-            # Try common patch sizes
-            for grid_size in [14, 16, 24, 28]:
-                num_image_patches = grid_size * grid_size
-                if num_image_patches <= seq_len:
-                    break
-            else:
-                grid_size = 14
-                num_image_patches = 196
-            
-            logger.info(f"Using grid_size={grid_size} for NV-Reason heatmap (seq_len={seq_len})")
+            # Try to get from processor config first
+            try:
+                if hasattr(self.processor, 'image_processor'):
+                    img_size = self.processor.image_processor.size.get('height', 448)
+                    patch_size = getattr(self.processor.image_processor, 'patch_size', 14)
+                    grid_size = img_size // patch_size
+                    num_image_patches = grid_size * grid_size
+                    logger.info(f"NV-Reason processor config: {img_size}x{img_size}, patch={patch_size}, grid={grid_size}x{grid_size}")
+                else:
+                    raise ValueError("No image_processor found")
+            except Exception as e:
+                logger.warning(f"Could not get NV-Reason processor config: {e}")
+                # Fallback: try common grid sizes that fit the sequence
+                for grid_size in [14, 16, 24, 28]:
+                    num_image_patches = grid_size * grid_size
+                    if num_image_patches <= seq_len:
+                        break
+                else:
+                    grid_size = 14
+                    num_image_patches = 196
+                logger.info(f"Using fallback grid: {grid_size}x{grid_size}={num_image_patches}")
             
             # For Qwen2.5-VL, image tokens may be at the beginning or end
             # Try finding the most "interesting" block of tokens
@@ -509,9 +569,10 @@ Be conservative - only mark as DETECTED if you have clear evidence."""
             else:
                 heatmap_normalized = np.zeros_like(heatmap_blurred)
             
-            # Apply lower threshold (50th percentile) and boost contrast
-            threshold = np.percentile(heatmap_normalized, 50)
-            heatmap_focused = np.clip((heatmap_normalized - threshold) * 2, 0, 1)
+            # Apply lower threshold (35th percentile) and boost contrast
+            # Reduced from 50th percentile to preserve more attention signal
+            threshold = np.percentile(heatmap_normalized, 35)
+            heatmap_focused = np.clip((heatmap_normalized - threshold) * 1.5, 0, 1)
             
             # Convert to colormap (JET colormap gives red for high attention)
             heatmap_colored = cv2.applyColorMap(
