@@ -576,17 +576,32 @@ class MedGemmaGradCAM:
             cam_smooth = (cam_smooth - cam_smooth.min()) / (cam_smooth.max() - cam_smooth.min())
         
         # =====================================================
-        # STEP 5: Extract contours for localization
+        # STEP 5: Extract contours with clinical constraints
+        # - Threshold top 25% activations
+        # - Morphological smoothing (close gaps, remove noise)
+        # - Extract largest connected components only
+        # - Limit to top 2 dominant regions
         # =====================================================
         cam_uint8 = (cam_smooth * 255).astype(np.uint8)
-        contour_thresh = int(np.percentile(cam_uint8[cam_uint8 > 0], 50)) if cam_uint8.max() > 0 else 128
+        
+        # Threshold at top 25% (75th percentile)
+        contour_thresh = int(np.percentile(cam_uint8[cam_uint8 > 0], 75)) if cam_uint8.max() > 0 else 128
         _, binary = cv2.threshold(cam_uint8, contour_thresh, 255, cv2.THRESH_BINARY)
+        
+        # Morphological operations for cleaner contours
+        morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, morph_kernel)  # Close gaps
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, morph_kernel)   # Remove noise
+        
+        # Additional smoothing for stable contours
+        binary = cv2.GaussianBlur(binary, (5, 5), 0)
+        _, binary = cv2.threshold(binary, 127, 255, cv2.THRESH_BINARY)
         
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Filter and rank contours
+        # Filter and rank contours - require minimum 1% of image area
         detected_regions = []
-        min_area = (w * h) * 0.005  # Minimum 0.5% of image
+        min_area = (w * h) * 0.01  # Minimum 1% of image (stricter)
         
         for contour in contours:
             area = cv2.contourArea(contour)
@@ -601,7 +616,7 @@ class MedGemmaGradCAM:
             else:
                 cx, cy = x + bw//2, y + bh//2
             
-            # Calculate region intensity
+            # Calculate region intensity (relative evidence contribution)
             mask = np.zeros((h, w), dtype=np.uint8)
             cv2.drawContours(mask, [contour], -1, 255, -1)
             region_intensity = cv2.mean(cam_smooth, mask=mask)[0]
@@ -615,9 +630,22 @@ class MedGemmaGradCAM:
                 "location": self._get_anatomical_location(cx, cy, w, h)
             })
         
-        # Sort by intensity and keep top 3
+        # Sort by intensity and keep only top 2 dominant regions
         detected_regions.sort(key=lambda r: r["intensity"], reverse=True)
-        top_regions = detected_regions[:3]
+        top_regions = detected_regions[:2]
+        
+        # Assign qualitative labels (Primary, Secondary) instead of percentages
+        # Normalize evidence scores relative to max
+        if top_regions:
+            max_intensity = top_regions[0]["intensity"]
+            for idx, region in enumerate(top_regions):
+                # Qualitative label
+                region["label"] = "Primary" if idx == 0 else "Secondary"
+                # Normalized evidence (relative to max, never 0%)
+                if max_intensity > 0:
+                    region["evidence_score"] = max(0.4, region["intensity"] / max_intensity)
+                else:
+                    region["evidence_score"] = 0.5
         
         # =====================================================
         # STEP 6: Create overlay with reduced opacity (0.35)
@@ -645,14 +673,14 @@ class MedGemmaGradCAM:
             # Green contour for detected regions
             cv2.drawContours(localization_map, [contour], -1, (0, 255, 0), 2)
             
-            # Add region label (R1, R2, etc.)
+            # Use qualitative label (Primary/Secondary) instead of R1/R2
             cx, cy = region["centroid"]
-            label = f"R{idx + 1}"
+            label = region.get("label", "Primary" if idx == 0 else "Secondary")
             
             # Draw label with background
-            (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
             cv2.rectangle(localization_map, (cx - 2, cy - lh - 4), (cx + lw + 4, cy + 4), (0, 0, 0), -1)
-            cv2.putText(localization_map, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(localization_map, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         
         logger.info(f"Clinical CAM: lung-masked, top-20%, {len(top_regions)} regions")
         
