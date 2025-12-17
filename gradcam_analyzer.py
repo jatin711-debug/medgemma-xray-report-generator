@@ -275,23 +275,26 @@ class MedGemmaGradCAM:
             # Check if we got activations and gradients
             if self.activations is None or self.gradients is None:
                 logger.warning("Failed to capture activations/gradients")
-                return self._create_placeholder(image)
+                placeholder_img, placeholder_cam = self._create_placeholder(image)
+                return placeholder_img, placeholder_cam, []
             
             # Compute GradCAM
             cam = self._compute_gradcam()
             
             if cam is None:
-                return self._create_placeholder(image)
+                placeholder_img, placeholder_cam = self._create_placeholder(image)
+                return placeholder_img, placeholder_cam, []
             
-            # Create overlay
-            heatmap_overlay = self._create_overlay(cam, image)
+            # Create clinical overlay with contours
+            heatmap_overlay, detected_regions = self._create_overlay(cam, image, condition)
             
-            logger.info(f"✅ Generated GradCAM for {condition}")
-            return heatmap_overlay, cam
+            logger.info(f"✅ Generated clinical GradCAM for {condition}: {len(detected_regions)} regions")
+            return heatmap_overlay, cam, detected_regions
             
         except Exception as e:
             logger.error(f"GradCAM generation failed: {e}", exc_info=True)
-            return self._create_placeholder(image)
+            placeholder_img, placeholder_cam = self._create_placeholder(image)
+            return placeholder_img, placeholder_cam, []
     
     def _compute_condition_score(self, logits: torch.Tensor, condition: str) -> torch.Tensor:
         """
@@ -452,45 +455,224 @@ class MedGemmaGradCAM:
             logger.error(f"GradCAM computation failed: {e}", exc_info=True)
             return None
     
-    def _create_overlay(self, cam: np.ndarray, original_image: Image.Image) -> Image.Image:
+    def _create_lung_mask(self, image_np: np.ndarray) -> np.ndarray:
         """
-        Create clinical-grade visualization overlay.
+        Create approximate lung region mask using intensity-based segmentation.
         
-        Uses smooth interpolation and professional colormap for
-        medical report quality output.
+        This filters out tubes, wires, and non-lung structures by:
+        1. Thresholding to find dark lung regions
+        2. Morphological operations to clean up
+        3. Finding the two largest contours (left/right lungs)
         """
-        # Convert to numpy
+        h, w = image_np.shape[:2]
+        
+        # Convert to grayscale if needed
+        if len(image_np.shape) == 3:
+            gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = image_np.copy()
+        
+        # Normalize to 0-255
+        if gray.max() > 1:
+            gray_norm = gray.astype(np.uint8)
+        else:
+            gray_norm = (gray * 255).astype(np.uint8)
+        
+        # Apply CLAHE for better contrast
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray_norm)
+        
+        # Threshold: lungs are typically dark regions (lower intensity)
+        # Use Otsu's method to find optimal threshold
+        _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # Morphological operations to clean up
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel)
+        
+        # Find contours and keep the two largest (left and right lungs)
+        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if len(contours) < 1:
+            # Fallback: create central elliptical mask
+            mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.ellipse(mask, (w//2, int(h*0.45)), (int(w*0.4), int(h*0.35)), 0, 0, 360, 255, -1)
+            return mask
+        
+        # Sort by area and keep top 2
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:2]
+        
+        # Create mask from largest contours
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.drawContours(mask, contours, -1, 255, -1)
+        
+        # Dilate slightly to include lung boundaries
+        dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 20))
+        mask = cv2.dilate(mask, dilate_kernel, iterations=1)
+        
+        # Smooth the mask edges
+        mask = cv2.GaussianBlur(mask, (21, 21), 0)
+        
+        return mask
+    
+    def _create_overlay(
+        self, 
+        cam: np.ndarray, 
+        original_image: Image.Image,
+        condition: str = "Finding"
+    ) -> Tuple[Image.Image, List[Dict]]:
+        """
+        Create clinical-grade visualization overlay with contours.
+        
+        Pipeline:
+        1. Resize CAM to image size
+        2. Apply lung mask (filter out tubes/wires)
+        3. Threshold top 20% activations
+        4. Smooth for regional output
+        5. Extract contours for localization
+        6. Blend with low opacity (0.35)
+        
+        Returns:
+            Tuple of (overlay_image, detected_regions)
+        """
         original_np = np.array(original_image.convert('RGB'))
         h, w = original_np.shape[:2]
         
-        # Resize CAM to image size with smooth interpolation
+        # =====================================================
+        # STEP 1: Resize CAM to image size
+        # =====================================================
         cam_resized = cv2.resize(cam, (w, h), interpolation=cv2.INTER_CUBIC)
         
-        # Additional smoothing at full resolution for ultra-smooth output
-        smooth_kernel = max(15, min(w, h) // 30)
+        # =====================================================
+        # STEP 2: Apply lung mask (filter artifacts)
+        # =====================================================
+        lung_mask = self._create_lung_mask(original_np)
+        lung_mask_float = lung_mask.astype(np.float32) / 255.0
+        cam_masked = cam_resized * lung_mask_float
+        
+        # =====================================================
+        # STEP 3: Threshold top 20% activations
+        # =====================================================
+        if cam_masked.max() > 0:
+            cam_normalized = cam_masked / cam_masked.max()
+        else:
+            cam_normalized = cam_masked
+            
+        threshold = np.percentile(cam_normalized[cam_normalized > 0], 80) if cam_normalized.max() > 0 else 0.5
+        cam_thresholded = np.where(cam_normalized >= threshold, cam_normalized, 0)
+        
+        # =====================================================
+        # STEP 4: Smooth for regional output
+        # =====================================================
+        smooth_kernel = max(25, min(w, h) // 20)
         if smooth_kernel % 2 == 0:
             smooth_kernel += 1
-        cam_resized = cv2.GaussianBlur(cam_resized, (smooth_kernel, smooth_kernel), 0)
+        cam_smooth = cv2.GaussianBlur(cam_thresholded.astype(np.float32), (smooth_kernel, smooth_kernel), 0)
         
-        # Re-normalize after smoothing
-        if cam_resized.max() > cam_resized.min():
-            cam_resized = (cam_resized - cam_resized.min()) / (cam_resized.max() - cam_resized.min())
+        # Re-normalize
+        if cam_smooth.max() > cam_smooth.min():
+            cam_smooth = (cam_smooth - cam_smooth.min()) / (cam_smooth.max() - cam_smooth.min())
         
-        # Apply colormap (JET for medical imaging - blue=low, red=high)
-        cam_uint8 = np.uint8(255 * cam_resized)
+        # =====================================================
+        # STEP 5: Extract contours for localization
+        # =====================================================
+        cam_uint8 = (cam_smooth * 255).astype(np.uint8)
+        contour_thresh = int(np.percentile(cam_uint8[cam_uint8 > 0], 50)) if cam_uint8.max() > 0 else 128
+        _, binary = cv2.threshold(cam_uint8, contour_thresh, 255, cv2.THRESH_BINARY)
+        
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Filter and rank contours
+        detected_regions = []
+        min_area = (w * h) * 0.005  # Minimum 0.5% of image
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < min_area:
+                continue
+            
+            # Get bounding box and centroid
+            x, y, bw, bh = cv2.boundingRect(contour)
+            M = cv2.moments(contour)
+            if M["m00"] > 0:
+                cx, cy = int(M["m10"]/M["m00"]), int(M["m01"]/M["m00"])
+            else:
+                cx, cy = x + bw//2, y + bh//2
+            
+            # Calculate region intensity
+            mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.drawContours(mask, [contour], -1, 255, -1)
+            region_intensity = cv2.mean(cam_smooth, mask=mask)[0]
+            
+            detected_regions.append({
+                "contour": contour,
+                "area": area,
+                "bbox": (x, y, bw, bh),
+                "centroid": (cx, cy),
+                "intensity": region_intensity,
+                "location": self._get_anatomical_location(cx, cy, w, h)
+            })
+        
+        # Sort by intensity and keep top 3
+        detected_regions.sort(key=lambda r: r["intensity"], reverse=True)
+        top_regions = detected_regions[:3]
+        
+        # =====================================================
+        # STEP 6: Create overlay with reduced opacity (0.35)
+        # =====================================================
+        # Apply colormap
         heatmap = cv2.applyColorMap(cam_uint8, cv2.COLORMAP_JET)
         heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
         
-        # Create alpha mask based on activation intensity
-        # Low activation areas will be more transparent
-        alpha_mask = cam_resized ** 0.5  # Square root for more visible mid-range
-        alpha_mask = np.clip(alpha_mask * 0.7, 0, 0.7)  # Max 70% opacity
+        # Variable alpha: only activated areas get color (max 0.35 opacity)
+        alpha_mask = cam_smooth ** 0.7  # Gentler falloff
+        alpha_mask = np.clip(alpha_mask * 0.35, 0, 0.35)  # Reduced max opacity
         alpha_3ch = np.stack([alpha_mask, alpha_mask, alpha_mask], axis=-1)
         
-        # Blend with variable alpha per pixel
+        # Blend
         blended = (alpha_3ch * heatmap + (1 - alpha_3ch) * original_np).astype(np.uint8)
         
-        return Image.fromarray(blended)
+        # =====================================================
+        # STEP 7: Draw contours on blended image
+        # =====================================================
+        for idx, region in enumerate(top_regions):
+            contour = region["contour"]
+            # Green contour for detected regions
+            cv2.drawContours(blended, [contour], -1, (0, 255, 0), 2)
+            
+            # Add region label (R1, R2, etc.)
+            cx, cy = region["centroid"]
+            label = f"R{idx + 1}"
+            
+            # Draw label with background
+            (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.rectangle(blended, (cx - 2, cy - lh - 4), (cx + lw + 4, cy + 4), (0, 0, 0), -1)
+            cv2.putText(blended, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        logger.info(f"Clinical CAM overlay: lung-masked, top-20%, {len(top_regions)} regions detected")
+        
+        return Image.fromarray(blended), top_regions
+    
+    def _get_anatomical_location(self, x: int, y: int, w: int, h: int) -> str:
+        """Determine anatomical location from coordinates."""
+        # Horizontal: left/central/right
+        if x < w * 0.35:
+            horiz = "Right"  # Radiographic convention: right side of patient
+        elif x > w * 0.65:
+            horiz = "Left"
+        else:
+            horiz = "Central"
+        
+        # Vertical: upper/mid/lower
+        if y < h * 0.35:
+            vert = "Upper"
+        elif y > h * 0.65:
+            vert = "Lower"
+        else:
+            vert = "Mid"
+        
+        return f"{vert} {horiz} Lung Zone"
     
     def _create_placeholder(self, image: Image.Image) -> Tuple[Image.Image, np.ndarray]:
         """Create placeholder when GradCAM fails."""
