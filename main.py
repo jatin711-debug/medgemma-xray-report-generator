@@ -907,10 +907,26 @@ class MedicalImageAnalyzer:
 
             original_cv_bgr = cv2.cvtColor(np.array(original_image.convert('RGB')), cv2.COLOR_RGB2BGR)
 
-            superimposed_img = cv2.addWeighted(heatmap_colored, self._HEATMAP_OVERLAY_ALPHA, original_cv_bgr, 1.0 - self._HEATMAP_OVERLAY_ALPHA, 0)
+            # Create alpha mask based on heatmap intensity
+            # Low attention (blue) areas will be more transparent
+            # High attention (red/yellow) areas will be more visible
+            alpha_mask = heatmap_blurred.astype(np.float32) / 255.0
+            
+            # Apply a power curve to make low values even more transparent
+            # Higher power = more transparent low values
+            alpha_mask = np.power(alpha_mask, 0.7)  # Adjust: higher = more transparent blues
+            
+            # Scale alpha to max overlay alpha
+            alpha_mask = alpha_mask * self._HEATMAP_OVERLAY_ALPHA
+            
+            # Expand alpha to 3 channels
+            alpha_3ch = np.stack([alpha_mask, alpha_mask, alpha_mask], axis=-1)
+            
+            # Blend with variable alpha per pixel
+            superimposed_img = (alpha_3ch * heatmap_colored + (1 - alpha_3ch) * original_cv_bgr).astype(np.uint8)
 
             final_image = Image.fromarray(cv2.cvtColor(superimposed_img, cv2.COLOR_BGR2RGB))
-            logger.info(f"Successfully created heatmap overlay (is_placeholder={is_placeholder}).")
+            logger.info(f"Successfully created heatmap overlay with alpha masking (is_placeholder={is_placeholder}).")
             return final_image
 
         except Exception as e:
