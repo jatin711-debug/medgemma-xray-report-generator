@@ -290,9 +290,24 @@ class PremiumReportGenerator:
         original_image: Image.Image,
         heatmap_image: Image.Image,
         consensus_data: Optional[Dict[str, Any]] = None,
-        density_saliency_image: Optional[Image.Image] = None
+        density_saliency_image: Optional[Image.Image] = None,
+        localization_map: Optional[Image.Image] = None,
+        detected_regions: Optional[List[Dict[str, Any]]] = None,
+        condition_confidences: Optional[Dict[str, float]] = None
     ) -> str:
-        """Generate premium DeepMind-style PDF report with optional density saliency map."""
+        """
+        Generate premium DeepMind-style PDF report with clinical layers.
+        
+        Args:
+            analysis_response: Structured analysis response
+            original_image: Original X-ray image
+            heatmap_image: AI attention heatmap
+            consensus_data: Multi-model consensus data
+            density_saliency_image: Opacity-based density map
+            localization_map: Image with contours around detected regions
+            detected_regions: List of detected region metadata
+            condition_confidences: Dict of condition -> confidence percentage
+        """
         
         filename = f"sentryai_medical_report_{analysis_response.analysis_id}.pdf"
         filepath = os.path.join(self.reports_dir, filename)
@@ -372,6 +387,86 @@ class PremiumReportGenerator:
             story.append(Spacer(1, 20))
         else:
             story.append(Spacer(1, 5))
+        
+        # === LESION LOCALIZATION (Layer 2) ===
+        if localization_map is not None and detected_regions:
+            story.append(Paragraph("LESION LOCALIZATION", self.styles['section_title']))
+            
+            img_width = 3.5 * inch
+            rl_localization = self._pil_to_reportlab(localization_map, img_width)
+            
+            # Create table with localization image and region details
+            region_text = []
+            for region in detected_regions[:5]:  # Top 5 regions
+                region_text.append(
+                    f"<b>Region {region['region_id']}</b>: {region['location']} - "
+                    f"Attention: {int(region['attention_score'] * 100)}%"
+                )
+            
+            region_info = "<br/>".join(region_text) if region_text else "No high-attention regions detected"
+            
+            loc_row = Table(
+                [[rl_localization, Paragraph(region_info, self.styles['body'])]],
+                colWidths=[img_width + 0.2*inch, 2.5*inch]
+            )
+            loc_row.setStyle(TableStyle([
+                ('ALIGN', (0, 0), (0, 0), 'CENTER'),
+                ('ALIGN', (1, 0), (1, 0), 'LEFT'),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('BACKGROUND', (0, 0), (-1, -1), self.colors['card_bg']),
+                ('BOX', (0, 0), (-1, -1), 1, self.colors['card_border']),
+                ('TOPPADDING', (0, 0), (-1, -1), 12),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+                ('LEFTPADDING', (1, 0), (1, 0), 15),
+            ]))
+            story.append(loc_row)
+            story.append(Spacer(1, 20))
+        
+        # === DIAGNOSTIC PROBABILITY (Layer 1 - Confidence Scores) ===
+        if condition_confidences:
+            story.append(Paragraph("DIAGNOSTIC PROBABILITY", self.styles['section_title']))
+            
+            prob_rows = []
+            for condition, confidence in sorted(condition_confidences.items(), key=lambda x: -x[1]):
+                # Format condition name
+                cond_display = condition.replace("_", " ").title()
+                
+                # Create visual bar
+                pct = int(confidence * 100)
+                bar_filled = "█" * (pct // 5)
+                bar_empty = "░" * (20 - pct // 5)
+                
+                # Determine status and color
+                if pct >= 70:
+                    status = "⚠️ DETECTED"
+                    status_color = "#E74C3C"  # Red
+                elif pct >= 40:
+                    status = "⚡ POSSIBLE"
+                    status_color = "#F39C12"  # Orange
+                else:
+                    status = "✓ NOT DETECTED"
+                    status_color = "#2ECC71"  # Green
+                
+                prob_rows.append([
+                    Paragraph(f"<b>{cond_display}</b>", self.styles['body']),
+                    Paragraph(f"<font face='Courier'>{bar_filled}{bar_empty}</font> <b>{pct}%</b>", self.styles['body']),
+                    Paragraph(f"<font color='{status_color}'>{status}</font>", self.styles['body'])
+                ])
+            
+            prob_table = Table(prob_rows, colWidths=[1.8*inch, 3.0*inch, 1.6*inch])
+            prob_table.setStyle(TableStyle([
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                ('ALIGN', (1, 0), (1, -1), 'LEFT'),
+                ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('BACKGROUND', (0, 0), (-1, -1), self.colors['card_bg']),
+                ('BOX', (0, 0), (-1, -1), 1, self.colors['card_border']),
+                ('INNERGRID', (0, 0), (-1, -1), 0.5, self.colors['card_border']),
+                ('TOPPADDING', (0, 0), (-1, -1), 8),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ]))
+            story.append(prob_table)
+            story.append(Spacer(1, 20))
         
         # === DETECTION CARDS ===
         story.append(Paragraph("CONDITION SCREENING", self.styles['section_title']))

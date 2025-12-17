@@ -7,7 +7,7 @@ import re
 import io
 import gc
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple, List
 from contextlib import asynccontextmanager
 import logging
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
@@ -142,6 +142,46 @@ class ModelStatus(BaseModel):
 
 # Global state for model‐loading error
 model_loading_error: Optional[str] = None
+
+# Confidence keywords for extracting probability from model text
+# Maps language patterns to confidence scores (0.0 - 1.0)
+CONFIDENCE_KEYWORDS = {
+    # High confidence (80-100%)
+    "definite": 0.95, "definitely": 0.95, "clearly": 0.90,
+    "confirmed": 0.95, "diagnostic of": 0.92, "classic": 0.90,
+    "highly suggestive": 0.88, "strongly suggests": 0.85,
+    "typical": 0.85, "characteristic": 0.85,
+    
+    # Moderate-high confidence (60-80%)
+    "consistent with": 0.75, "compatible with": 0.72,
+    "suggestive of": 0.70, "likely": 0.72, "probable": 0.75,
+    "appears to be": 0.68, "representing": 0.70,
+    
+    # Moderate confidence (40-60%)
+    "possible": 0.50, "may represent": 0.48, "could be": 0.45,
+    "cannot exclude": 0.42, "suspicious": 0.55, "questionable": 0.45,
+    "might be": 0.45, "potentially": 0.50,
+    
+    # Low confidence (10-40%)
+    "unlikely": 0.25, "doubtful": 0.20, "improbable": 0.15,
+    "low probability": 0.20, "less likely": 0.30,
+    
+    # Negative/Normal (0-10%)
+    "no evidence": 0.05, "absent": 0.03, "normal": 0.05,
+    "unremarkable": 0.03, "clear lungs": 0.02, "no significant": 0.05,
+    "within normal": 0.04, "negative for": 0.03,
+}
+
+# Condition-specific keywords that indicate detection
+CONDITION_DETECTION_KEYWORDS = {
+    "pneumonia": ["pneumonia", "consolidation", "infiltrate", "infection", "opacity consistent with infection"],
+    "pneumothorax": ["pneumothorax", "collapsed lung", "air in pleural", "lung collapse"],
+    "tuberculosis": ["tuberculosis", "tb", "tuberculous", "cavitary lesion", "miliary pattern"],
+    "effusion": ["effusion", "pleural fluid", "fluid collection", "blunting of costophrenic"],
+    "cardiomegaly": ["cardiomegaly", "enlarged heart", "cardiac enlargement", "increased cardiac silhouette"],
+    "nodule": ["nodule", "mass", "lesion", "tumor", "neoplasm"],
+    "atelectasis": ["atelectasis", "collapse", "volume loss"],
+}
 
 
 class MedicalImageAnalyzer:
@@ -333,6 +373,63 @@ class MedicalImageAnalyzer:
                 recommendations=["Manual review recommended"],
                 confidence_level="Not available"
             )
+
+    def extract_condition_confidences(self, raw_response: str) -> Dict[str, float]:
+        """
+        Extract confidence scores for each medical condition from model text.
+        
+        Parses the response text for confidence-indicating language and
+        condition-specific keywords to determine probability percentages.
+        
+        Args:
+            raw_response: Raw text output from the AI model
+            
+        Returns:
+            Dict mapping condition names to confidence scores (0.0-1.0)
+        """
+        response_lower = raw_response.lower()
+        confidences = {}
+        
+        for condition, keywords in CONDITION_DETECTION_KEYWORDS.items():
+            # Check if condition is mentioned
+            condition_mentioned = any(kw in response_lower for kw in keywords)
+            
+            if not condition_mentioned:
+                # Condition not discussed - very low confidence
+                confidences[condition] = 0.05
+                continue
+            
+            # Find the highest applicable confidence keyword
+            max_confidence = 0.50  # Default if mentioned but no confidence language
+            
+            # Look for negative indicators first
+            negative_patterns = [
+                f"no {condition}", f"no evidence of {condition}", 
+                f"negative for {condition}", f"without {condition}",
+                f"not detected", f"ruled out"
+            ]
+            
+            is_negative = any(pattern in response_lower for pattern in negative_patterns)
+            
+            if is_negative:
+                # Negative finding - low probability
+                confidences[condition] = 0.08
+                continue
+            
+            # Check for confidence keywords near condition keywords
+            for conf_keyword, conf_score in CONFIDENCE_KEYWORDS.items():
+                if conf_keyword in response_lower:
+                    # Check if this confidence keyword is near a condition keyword
+                    for cond_kw in keywords:
+                        if cond_kw in response_lower:
+                            # Found both - use this confidence
+                            if conf_score > max_confidence:
+                                max_confidence = conf_score
+            
+            confidences[condition] = max_confidence
+        
+        logger.info(f"Extracted confidences: {confidences}")
+        return confidences
 
     async def analyze_image(self, image: Image.Image) -> tuple[str, RadiologyFindings, Image.Image]:
         """
@@ -671,7 +768,7 @@ class MedicalImageAnalyzer:
 
     def _generate_density_saliency_map(self, original_image: Image.Image, 
                                         gaussian_kernel: int = 25,
-                                        overlay_alpha: float = 0.6) -> Image.Image:
+                                        overlay_alpha: float = 0.4) -> Image.Image:
         """
         Generates an opacity-based saliency heatmap that highlights X-ray density patterns.
         
@@ -717,15 +814,9 @@ class MedicalImageAnalyzer:
             # Convert original to BGR for blending
             original_bgr = cv2.cvtColor(np.array(original_image.convert("RGB")), cv2.COLOR_RGB2BGR)
             
-            # Create alpha mask based on intensity (denser areas more visible)
-            alpha_mask = normalized.astype(np.float32) / 255.0
-            alpha_mask = alpha_mask * overlay_alpha
-            
-            # Expand to 3 channels
-            alpha_3ch = np.stack([alpha_mask, alpha_mask, alpha_mask], axis=-1)
-            
-            # Blend with variable alpha
-            blended = (alpha_3ch * heatmap_colored + (1 - alpha_3ch) * original_bgr).astype(np.uint8)
+            # Use uniform alpha blending (not intensity-based) to reduce orange dominance
+            # Lower alpha = more original image visible, less harsh colors
+            blended = cv2.addWeighted(heatmap_colored, overlay_alpha, original_bgr, 1.0 - overlay_alpha, 0)
             
             # Convert back to PIL RGB
             result = Image.fromarray(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB))
@@ -736,6 +827,158 @@ class MedicalImageAnalyzer:
         except Exception as e:
             logger.error(f"Error generating density saliency map: {e}", exc_info=True)
             return original_image.convert("RGB")
+
+    def _generate_localization_map(
+        self, 
+        heatmap_raw: np.ndarray, 
+        original_image: Image.Image,
+        threshold_percentile: int = 80,
+        min_contour_area: int = 500,
+        contour_color: Tuple[int, int, int] = (0, 255, 0),  # Green
+        contour_thickness: int = 2
+    ) -> Tuple[Image.Image, List[Dict[str, Any]]]:
+        """
+        Generate lesion localization map with contours around high-attention regions.
+        
+        Thresholds the attention heatmap and finds contours to highlight
+        all regions where the AI model focused its attention.
+        
+        Args:
+            heatmap_raw: Raw 2D attention heatmap (any size, will be resized)
+            original_image: Original image to draw on
+            threshold_percentile: Percentile for thresholding (higher = fewer regions)
+            min_contour_area: Minimum contour area in pixels (filters noise)
+            contour_color: BGR color for contours
+            contour_thickness: Line thickness for contours
+            
+        Returns:
+            Tuple of:
+                - Image with contours drawn
+                - List of detected regions with metadata
+        """
+        try:
+            if heatmap_raw is None or heatmap_raw.size == 0:
+                logger.warning("No heatmap provided for localization")
+                return original_image.copy(), []
+            
+            img_width, img_height = original_image.size
+            
+            # Resize heatmap to image size
+            heatmap_resized = cv2.resize(
+                heatmap_raw.astype(np.float32), 
+                (img_width, img_height), 
+                interpolation=cv2.INTER_LINEAR
+            )
+            
+            # Normalize to 0-255
+            if heatmap_resized.max() > heatmap_resized.min():
+                heatmap_normalized = ((heatmap_resized - heatmap_resized.min()) / 
+                                     (heatmap_resized.max() - heatmap_resized.min()) * 255)
+            else:
+                logger.warning("Heatmap is flat, no regions to detect")
+                return original_image.copy(), []
+            
+            heatmap_uint8 = heatmap_normalized.astype(np.uint8)
+            
+            # Apply Gaussian blur to smooth edges
+            heatmap_smooth = cv2.GaussianBlur(heatmap_uint8, (9, 9), 0)
+            
+            # Threshold to binary mask
+            threshold_value = np.percentile(heatmap_smooth, threshold_percentile)
+            _, binary_mask = cv2.threshold(heatmap_smooth, threshold_value, 255, cv2.THRESH_BINARY)
+            
+            # Find contours
+            contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Convert original to BGR for drawing
+            result_bgr = cv2.cvtColor(np.array(original_image.convert("RGB")), cv2.COLOR_RGB2BGR)
+            
+            # Filter and draw contours
+            detected_regions = []
+            for i, contour in enumerate(contours):
+                area = cv2.contourArea(contour)
+                if area < min_contour_area:
+                    continue
+                
+                # Get bounding box
+                x, y, w, h = cv2.boundingRect(contour)
+                
+                # Get centroid
+                M = cv2.moments(contour)
+                if M["m00"] > 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                else:
+                    cx, cy = x + w // 2, y + h // 2
+                
+                # Calculate region attention score (mean intensity in region)
+                mask = np.zeros(heatmap_uint8.shape, dtype=np.uint8)
+                cv2.drawContours(mask, [contour], -1, 255, -1)
+                region_intensity = cv2.mean(heatmap_uint8, mask=mask)[0] / 255.0
+                
+                # Determine anatomical location based on position
+                location = self._get_anatomical_location(cx, cy, img_width, img_height)
+                
+                # Draw contour
+                cv2.drawContours(result_bgr, [contour], -1, contour_color, contour_thickness)
+                
+                # Draw region label
+                label = f"R{i+1}: {int(region_intensity * 100)}%"
+                cv2.putText(result_bgr, label, (x, y - 5), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, contour_color, 1)
+                
+                detected_regions.append({
+                    "region_id": i + 1,
+                    "bbox": (x, y, w, h),
+                    "centroid": (cx, cy),
+                    "area": area,
+                    "attention_score": round(region_intensity, 2),
+                    "location": location
+                })
+            
+            # Sort by attention score (highest first)
+            detected_regions.sort(key=lambda r: r["attention_score"], reverse=True)
+            
+            result_image = Image.fromarray(cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB))
+            
+            logger.info(f"Localization: found {len(detected_regions)} regions above threshold")
+            return result_image, detected_regions
+            
+        except Exception as e:
+            logger.error(f"Error generating localization map: {e}", exc_info=True)
+            return original_image.copy(), []
+    
+    def _get_anatomical_location(self, x: int, y: int, img_width: int, img_height: int) -> str:
+        """Determine anatomical location based on image coordinates."""
+        # Normalize coordinates
+        nx = x / img_width
+        ny = y / img_height
+        
+        # Vertical zones
+        if ny < 0.33:
+            vertical = "upper"
+        elif ny < 0.66:
+            vertical = "middle"
+        else:
+            vertical = "lower"
+        
+        # Horizontal zones (PA chest X-ray: left side of image = right lung)
+        if nx < 0.4:
+            horizontal = "right"
+        elif nx > 0.6:
+            horizontal = "left"
+        else:
+            horizontal = "central"
+        
+        if horizontal == "central":
+            if ny < 0.3:
+                return "mediastinum"
+            elif ny < 0.7:
+                return "cardiac/hilar"
+            else:
+                return "lower central"
+        else:
+            return f"{horizontal} {vertical} lung"
 
     def _generate_probability_map(self, heatmap_normalized_np: Optional[np.ndarray], original_image: Image.Image) -> Image.Image:
         """
@@ -1401,7 +1644,8 @@ async def analyze_url_and_generate_report(
         PDFGenerationResponse: PDF file S3 path and analysis identifier
     """
     # Perform MULTI-MODEL analysis - uses both MedGemma and NV-Reason-CXR
-    multi_response, original_image, heatmap, saliency, probability, segmentation = \
+    (multi_response, original_image, heatmap, saliency, probability, segmentation,
+     localization_map, detected_regions, condition_confidences) = \
         await multi_analyzer.analyze_image_from_url(str(request.image_url))
     
     # Create adapter response for PDF generator (expects AnalysisResponse format)
@@ -1453,12 +1697,15 @@ async def analyze_url_and_generate_report(
     
     # Generate premium PDF with full multi-model data
     local_pdf_path = await run_in_threadpool(
-        pdf_generator.generate_report,  # New method name
+        pdf_generator.generate_report,
         adapter_response,
         original_image,
         heatmap,
         consensus_data,  # Pass full consensus data
-        saliency  # Pass density saliency map
+        saliency,  # Pass density saliency map
+        localization_map,  # Contour-based localization
+        detected_regions,  # Region metadata
+        condition_confidences  # Confidence scores per condition
     )
     
     # LOCAL TESTING MODE: Skip S3 upload and database storage

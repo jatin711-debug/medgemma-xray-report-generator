@@ -211,6 +211,30 @@ class MultiModelAnalyzer:
             logger.info("Generated density-based saliency map (model-free)")
         else:
             saliency_map = primary_heatmap
+        
+        # Generate localization map with contours (Layer 2)
+        localization_map = None
+        detected_regions = []
+        if self.medgemma is not None and medgemma_raw_heatmap is not None:
+            localization_map, detected_regions = self.medgemma._generate_localization_map(
+                medgemma_raw_heatmap, image
+            )
+            logger.info(f"Generated localization map with {len(detected_regions)} regions")
+        
+        # Extract confidence scores (Layer 1)
+        condition_confidences = {}
+        if self.medgemma is not None and medgemma_raw:
+            condition_confidences = self.medgemma.extract_condition_confidences(medgemma_raw)
+            # Also include NV-Reason data if available
+            if nv_raw:
+                nv_confidences = self.medgemma.extract_condition_confidences(nv_raw)
+                # Average the confidences from both models
+                for condition in condition_confidences:
+                    if condition in nv_confidences:
+                        condition_confidences[condition] = (
+                            condition_confidences[condition] + nv_confidences[condition]
+                        ) / 2
+            logger.info(f"Extracted condition confidences: {condition_confidences}")
             
         probability_map = primary_heatmap
         segmentation_map = primary_heatmap
@@ -228,7 +252,9 @@ class MultiModelAnalyzer:
             nv_reason_success=nv_success
         )
         
-        return response, image, primary_heatmap, saliency_map, probability_map, segmentation_map
+        # Return extended tuple with new outputs
+        return (response, image, primary_heatmap, saliency_map, probability_map, 
+                segmentation_map, localization_map, detected_regions, condition_confidences)
     
     def _aggregate_findings(
         self,
@@ -345,11 +371,12 @@ class MultiModelAnalyzer:
         
         return await self.analyze_with_consensus(image)
     
-    async def analyze_image_from_url(self, image_url: str) -> Tuple[MultiModelAnalysisResponse, Image.Image, Image.Image, Image.Image, Image.Image, Image.Image]:
+    async def analyze_image_from_url(self, image_url: str):
         """
         Analyze medical image from URL.
         
-        Returns tuple of (response, original_image, heatmap, saliency, probability, segmentation)
+        Returns tuple of (response, original_image, heatmap, saliency, probability, 
+                          segmentation, localization_map, detected_regions, condition_confidences)
         """
         import io
         import aiohttp
