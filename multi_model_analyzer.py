@@ -231,20 +231,53 @@ class MultiModelAnalyzer:
             )
             logger.info(f"Generated localization map with {len(detected_regions)} regions")
         
+        
         # Extract confidence scores (Layer 1)
+        # Use consensus findings instead of raw text mining for more accurate confidence
         condition_confidences = {}
-        if self.medgemma is not None and medgemma_raw:
-            condition_confidences = self.medgemma.extract_condition_confidences(medgemma_raw)
-            # Also include NV-Reason data if available
-            if nv_raw:
-                nv_confidences = self.medgemma.extract_condition_confidences(nv_raw)
-                # Average the confidences from both models
-                for condition in condition_confidences:
-                    if condition in nv_confidences:
-                        condition_confidences[condition] = (
-                            condition_confidences[condition] + nv_confidences[condition]
-                        ) / 2
-            logger.info(f"Extracted condition confidences: {condition_confidences}")
+        if consensus:
+            # Get all abnormalities from consensus
+            all_abnormalities_lower = [a.lower() for a in consensus.all_abnormalities]
+            mg_abnormalities_lower = [a.lower() for a in consensus.medgemma_abnormalities]
+            nv_abnormalities_lower = [a.lower() for a in consensus.nv_reason_abnormalities]
+            
+            # Define the 3 conditions we track
+            TRACKED_CONDITIONS = {
+                "pneumonia": ["pneumonia", "consolidation", "infiltrate"],
+                "pneumothorax": ["pneumothorax", "ptx"],
+                "tuberculosis": ["tuberculosis", "tb"],
+            }
+            
+            for condition_name, keywords in TRACKED_CONDITIONS.items():
+                # Check if ANY model detected this condition
+                detected_by_any = any(
+                    any(keyword in abnormality for keyword in keywords)
+                    for abnormality in all_abnormalities_lower
+                )
+                
+                # Count how many models detected it
+                detected_by_mg = any(
+                    any(keyword in abnormality for keyword in keywords)
+                    for abnormality in mg_abnormalities_lower
+                )
+                detected_by_nv = any(
+                    any(keyword in abnormality for keyword in keywords)
+                    for abnormality in nv_abnormalities_lower
+                )
+                
+                if detected_by_any:
+                    # Both models detected = very high confidence
+                    if detected_by_mg and detected_by_nv:
+                        condition_confidences[condition_name] = 0.85
+                    # Only one model detected = moderate-high confidence
+                    else:
+                        condition_confidences[condition_name] = 0.75
+                else:
+                    # Not detected = very low confidence
+                    condition_confidences[condition_name] = 0.08
+            
+            logger.info(f"Extracted condition confidences from consensus: {condition_confidences}")
+        
             
         probability_map = primary_heatmap
         segmentation_map = primary_heatmap

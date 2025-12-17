@@ -916,7 +916,7 @@ class MedicalImageAnalyzer:
             # Convert original to BGR for drawing
             result_bgr = cv2.cvtColor(np.array(original_image.convert("RGB")), cv2.COLOR_RGB2BGR)
             
-            # Filter and draw contours
+            # Filter and collect contours
             detected_regions = []
             for i, contour in enumerate(contours):
                 area = cv2.contourArea(contour)
@@ -939,16 +939,12 @@ class MedicalImageAnalyzer:
                 cv2.drawContours(mask, [contour], -1, 255, -1)
                 region_intensity = cv2.mean(heatmap_uint8, mask=mask)[0] / 255.0
                 
+                # Filter: Only keep regions with >40% attention
+                if region_intensity <= 0.40:
+                    continue
+                
                 # Determine anatomical location based on position
                 location = self._get_anatomical_location(cx, cy, img_width, img_height)
-                
-                # Draw contour
-                cv2.drawContours(result_bgr, [contour], -1, contour_color, contour_thickness)
-                
-                # Draw region label
-                label = f"R{i+1}: {int(region_intensity * 100)}%"
-                cv2.putText(result_bgr, label, (x, y - 5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, contour_color, 1)
                 
                 detected_regions.append({
                     "region_id": i + 1,
@@ -956,16 +952,65 @@ class MedicalImageAnalyzer:
                     "centroid": (cx, cy),
                     "area": area,
                     "attention_score": round(region_intensity, 2),
-                    "location": location
+                    "location": location,
+                    "contour": contour  # Store contour for drawing
                 })
             
-            # Sort by attention score (highest first)
+            # Sort by attention score (highest first) and keep only top 3
             detected_regions.sort(key=lambda r: r["attention_score"], reverse=True)
+            top_regions = detected_regions[:3]
+            
+            # Now draw only the top 3 regions with better label positioning
+            for idx, region_data in enumerate(top_regions):
+                contour = region_data["contour"]
+                x, y, w, h = region_data["bbox"]
+                attention_pct = int(region_data["attention_score"] * 100)
+                
+                # Draw contour with thicker line for better visibility
+                cv2.drawContours(result_bgr, [contour], -1, contour_color, 3)
+                
+                # Better label positioning: above bounding box with background
+                label = f"R{idx+1}: {attention_pct}%"
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.6
+                font_thickness = 2
+                
+                # Get label size for background
+                (label_w, label_h), baseline = cv2.getTextSize(label, font, font_scale, font_thickness)
+                
+                # Position label above bounding box, with padding
+                label_x = x
+                label_y = y - 10
+                
+                # Ensure label doesn't go off screen
+                if label_y - label_h < 0:
+                    label_y = y + h + label_h + 10
+                if label_x + label_w > img_width:
+                    label_x = img_width - label_w - 5
+                
+                # Draw semi-transparent background for label
+                overlay = result_bgr.copy()
+                cv2.rectangle(overlay, 
+                            (label_x - 5, label_y - label_h - 5),
+                            (label_x + label_w + 5, label_y + baseline),
+                            (0, 0, 0), -1)
+                result_bgr = cv2.addWeighted(overlay, 0.6, result_bgr, 0.4, 0)
+                
+                # Draw label text in white for better contrast
+                cv2.putText(result_bgr, label, (label_x, label_y), 
+                           font, font_scale, (255, 255, 255), font_thickness)
+                
+                # Remove contour from region data (don't need it in return value)
+                region_data.pop("contour", None)
+            
+            # Update region IDs in the final list (1, 2, 3)
+            for idx, region in enumerate(top_regions):
+                region["region_id"] = idx + 1
             
             result_image = Image.fromarray(cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB))
             
-            logger.info(f"Localization: found {len(detected_regions)} regions above threshold")
-            return result_image, detected_regions
+            logger.info(f"Localization: showing top {len(top_regions)} regions with >40% attention")
+            return result_image, top_regions
             
         except Exception as e:
             logger.error(f"Error generating localization map: {e}", exc_info=True)
