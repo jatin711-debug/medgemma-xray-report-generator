@@ -215,9 +215,9 @@ class MultiModelAnalyzer:
         # Generate localization map with contours (Layer 2)
         localization_map = None
         detected_regions = []
-        if self.medgemma is not None and medgemma_raw_heatmap is not None:
+        if self.medgemma is not None and medgemma_heatmap is not None:
             localization_map, detected_regions = self.medgemma._generate_localization_map(
-                medgemma_raw_heatmap, image
+                medgemma_heatmap, image
             )
             logger.info(f"Generated localization map with {len(detected_regions)} regions")
         
