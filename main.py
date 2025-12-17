@@ -939,8 +939,8 @@ class MedicalImageAnalyzer:
                 cv2.drawContours(mask, [contour], -1, 255, -1)
                 region_intensity = cv2.mean(heatmap_uint8, mask=mask)[0] / 255.0
                 
-                # Filter: Only keep regions with >40% attention
-                if region_intensity <= 0.40:
+                # Filter: Only keep regions with >25% attention (adjusted for typical heatmap values)
+                if region_intensity <= 0.25:
                     continue
                 
                 # Determine anatomical location based on position
