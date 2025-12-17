@@ -359,7 +359,8 @@ class MedGemmaGradCAM:
             cam = F.relu(cam)
             
             # Take first batch element and reshape to grid
-            cam = cam[0].cpu().numpy()  # (num_patches,)
+            # Convert to float32 first (numpy doesn't support bfloat16)
+            cam = cam[0].cpu().float().numpy()  # (num_patches,)
             
             # Determine grid size (sqrt of num_patches for square grid)
             num_patches = cam.shape[0]
