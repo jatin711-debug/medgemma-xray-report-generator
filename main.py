@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, HttpUrl
 from PIL import Image
-from premium_report_generator import PremiumReportGenerator
+from clinical_report_generator import ClinicalReportGenerator as PremiumReportGenerator
 import gc
 import torch
 from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
