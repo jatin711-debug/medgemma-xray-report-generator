@@ -177,6 +177,45 @@ def debug_medgemma_attention():
             
             print(f"\n  >>> If image tokens are at START, first_256 should be higher")
             print(f"  >>> If image tokens are at END, last_256 should be higher")
+        
+        # Check image_hidden_states
+        if hasattr(outputs, 'image_hidden_states') and outputs.image_hidden_states is not None:
+            print("\n" + "="*60)
+            print("IMAGE HIDDEN STATES ANALYSIS:")
+            print("="*60)
+            img_hidden = outputs.image_hidden_states
+            if isinstance(img_hidden, (list, tuple)):
+                print(f"  Type: {type(img_hidden).__name__} with {len(img_hidden)} elements")
+                for i, h in enumerate(img_hidden):
+                    if hasattr(h, 'shape'):
+                        print(f"    Element {i} shape: {h.shape}")
+                        # This might tell us actual image token count!
+                        if len(h.shape) == 3:
+                            batch, num_img_tokens, hidden_dim = h.shape
+                            print(f"    >>> DETECTED {num_img_tokens} image tokens!")
+                            grid_size = int(num_img_tokens ** 0.5)
+                            if grid_size * grid_size == num_img_tokens:
+                                print(f"    >>> This forms a {grid_size}x{grid_size} grid")
+            elif hasattr(img_hidden, 'shape'):
+                print(f"  Shape: {img_hidden.shape}")
+        
+        # Analyze input_ids to find special tokens
+        print("\n" + "="*60)
+        print("TOKEN ANALYSIS:")
+        print("="*60)
+        input_ids = inputs["input_ids"][0].cpu().tolist()
+        print(f"  First 20 token IDs: {input_ids[:20]}")
+        print(f"  Last 20 token IDs: {input_ids[-20:]}")
+        
+        # Look for image placeholder token (usually a special token ID)
+        unique_tokens = set(input_ids)
+        print(f"  Unique tokens in sequence: {len(unique_tokens)}")
+        
+        # Check if there's a repeated token that could be image placeholders
+        from collections import Counter
+        token_counts = Counter(input_ids)
+        most_common = token_counts.most_common(5)
+        print(f"  Most common tokens: {most_common}")
     else:
         print("  ❌ NO ATTENTIONS FOUND IN OUTPUT!")
         print("  This means output_attentions=True is not working as expected.")
