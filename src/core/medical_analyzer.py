@@ -72,6 +72,8 @@ class MedicalImageAnalyzer:
     async def load_model(self) -> None:
         """
         Load the Med-GEMMA-3 model and processor with memory optimization.
+        
+        Supports 4-bit quantization when MEDGEMMA_QUANTIZE=1 environment variable is set.
         """
         global model_loading_error
         if self.model_loaded:
@@ -79,17 +81,52 @@ class MedicalImageAnalyzer:
             return
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        use_quantization = os.environ.get("MEDGEMMA_QUANTIZE", "0") == "1"
+        
         logger.info(f"Loading model on device: {device}")
+        logger.info(f"Quantization: {'4-bit' if use_quantization else 'Full precision (bfloat16)'}")
         logger.info(f"System memory before loading: {get_system_memory_info()}")
 
         try:
             self.processor = AutoProcessor.from_pretrained(self.model_id, use_fast=True)
-            self.model = AutoModelForImageTextToText.from_pretrained(
-                self.model_id,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="eager",
-                device_map="auto"
-            )
+            
+            if use_quantization and torch.cuda.is_available():
+                # 4-bit quantization for reduced VRAM usage
+                try:
+                    from transformers import BitsAndBytesConfig
+                    
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=torch.bfloat16,
+                        bnb_4bit_use_double_quant=True,
+                        bnb_4bit_quant_type="nf4"
+                    )
+                    
+                    self.model = AutoModelForImageTextToText.from_pretrained(
+                        self.model_id,
+                        quantization_config=quantization_config,
+                        attn_implementation="eager",
+                        device_map="auto"
+                    )
+                    logger.info("✅ Model loaded with 4-bit quantization")
+                except ImportError:
+                    logger.warning("bitsandbytes not installed, falling back to full precision")
+                    self.model = AutoModelForImageTextToText.from_pretrained(
+                        self.model_id,
+                        torch_dtype=torch.bfloat16,
+                        attn_implementation="eager",
+                        device_map="auto"
+                    )
+            else:
+                # Full precision (bfloat16)
+                self.model = AutoModelForImageTextToText.from_pretrained(
+                    self.model_id,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="eager",
+                    device_map="auto"
+                )
+                logger.info("✅ Model loaded with full precision (bfloat16)")
+            
             self.model_loaded = True
             model_loading_error = None
             
