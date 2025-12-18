@@ -919,7 +919,8 @@ class ClinicalReportGenerator:
         localization_map: Optional[Image.Image] = None,
         detected_regions: Optional[List[Dict[str, Any]]] = None,
         condition_confidences: Optional[Dict[str, float]] = None,
-        primary_condition: str = "Pneumonia"
+        primary_condition: str = "Pneumonia",
+        per_condition_maps: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Generate clinical-grade PDF report.
@@ -927,12 +928,14 @@ class ClinicalReportGenerator:
         Args:
             analysis_response: Structured analysis response
             original_image: Original X-ray image
-            heatmap_image: AI attention heatmap
+            heatmap_image: AI attention heatmap (primary condition)
             consensus_data: Multi-model consensus data
             density_saliency_image: Density/saliency map (optional)
             localization_map: Lesion localization map (optional)
             detected_regions: List of detected region metadata
             condition_confidences: Dict of condition -> confidence (0-1)
+            primary_condition: Primary detected condition name
+            per_condition_maps: Dict of condition -> {heatmap, localization, regions} for each detected condition
         
         Returns:
             Path to generated PDF file
@@ -1024,38 +1027,87 @@ class ClinicalReportGenerator:
         story.append(PageBreak())
         
         # =====================================================================
-        # PAGE 2: IMAGING ANALYSIS (Side-by-side)
+        # IMAGING ANALYSIS: Render evidence maps for ALL detected conditions
         # =====================================================================
-        # Format caption matching requirement: "AI Evidence Map (Pneumonia – CAM-based)"
-        evidence_caption = f"AI Evidence Map ({primary_condition} – CAM-based)"
-        
         story.append(Paragraph("IMAGING ANALYSIS", self.styles['section_title']))
         story.append(Spacer(1, 10))
-        story.append(self._build_side_by_side_images(
-            original_image, heatmap_image,
-            "Original Radiograph", evidence_caption
-        ))
-        story.append(Spacer(1, 15))
+        
+        # Determine which conditions to show evidence maps for
+        conditions_to_render = []
+        if per_condition_maps:
+            # Use per-condition maps (each detected condition gets its own evidence map)
+            for cond_name, cond_data in per_condition_maps.items():
+                if cond_data.get('heatmap') is not None:
+                    conditions_to_render.append({
+                        'name': cond_name.title(),
+                        'heatmap': cond_data['heatmap'],
+                        'localization': cond_data.get('localization'),
+                        'regions': cond_data.get('regions', [])
+                    })
+        
+        # Fallback: use the primary condition's heatmap if no per-condition maps
+        if not conditions_to_render:
+            conditions_to_render.append({
+                'name': primary_condition.title(),
+                'heatmap': heatmap_image,
+                'localization': localization_map,
+                'regions': detected_regions or []
+            })
+        
+        # Render evidence map for each detected condition
+        for i, cond_info in enumerate(conditions_to_render):
+            cond_name = cond_info['name']
+            cond_heatmap = cond_info['heatmap']
+            
+            # Add subsection header if multiple conditions
+            if len(conditions_to_render) > 1:
+                story.append(Paragraph(f"<b>{cond_name} Evidence</b>", self.styles['subsection_title']))
+                story.append(Spacer(1, 5))
+            
+            # Format caption: "AI Evidence Map (Pneumonia – CAM-based)"
+            evidence_caption = f"AI Evidence Map ({cond_name} – CAM-based)"
+            
+            story.append(self._build_side_by_side_images(
+                original_image, cond_heatmap,
+                "Original Radiograph", evidence_caption
+            ))
+            story.append(Spacer(1, 10))
+        
         story.append(Paragraph(
-            "<i>The AI evidence map highlights regions contributing to the diagnostic finding. "
+            "<i>The AI evidence maps highlight regions contributing to each diagnostic finding. "
             "Warmer colors (red/yellow) indicate areas of higher diagnostic relevance.</i>",
             self.styles['body_small']
         ))
         story.append(PageBreak())
         
         # =====================================================================
-        # PAGE 3: LESION LOCALIZATION + DENSITY VISUALIZATION
+        # LESION LOCALIZATION: Render for ALL detected conditions
         # =====================================================================
-        if localization_map is not None:
-            story.append(Paragraph("LESION LOCALIZATION", self.styles['section_title']))
-            story.append(Spacer(1, 10))
-            # Pass condition to localization section builder
-            story.extend(self._build_localization_section(localization_map, detected_regions or [], condition=primary_condition))
-            story.append(Spacer(1, 25))
+        story.append(Paragraph("LESION LOCALIZATION", self.styles['section_title']))
+        story.append(Spacer(1, 10))
         
-        # NOTE: Density visualization removed from main clinical report
-        # (Non-diagnostic, could confuse interpretation)
-        # Can be added to technical appendix if needed
+        for i, cond_info in enumerate(conditions_to_render):
+            cond_name = cond_info['name']
+            cond_localization = cond_info.get('localization')
+            cond_regions = cond_info.get('regions', [])
+            
+            if cond_localization is not None:
+                # Add subsection header if multiple conditions
+                if len(conditions_to_render) > 1:
+                    story.append(Paragraph(f"<b>{cond_name}</b>", self.styles['subsection_title']))
+                    story.append(Spacer(1, 5))
+                
+                story.extend(self._build_localization_section(
+                    cond_localization, cond_regions, condition=cond_name
+                ))
+                story.append(Spacer(1, 15))
+        
+        # Fallback if no localization maps available
+        if not any(c.get('localization') for c in conditions_to_render):
+            if localization_map is not None:
+                story.extend(self._build_localization_section(
+                    localization_map, detected_regions or [], condition=primary_condition
+                ))
         
         story.append(PageBreak())
         

@@ -1672,7 +1672,8 @@ async def analyze_and_generate_report(
         localization_map,
         detected_regions,
         condition_confidences,
-        primary_condition
+        primary_condition,
+        per_condition_maps  # Pass per-condition evidence maps
     )
     
     return PDFGenerationResponse(
@@ -1775,6 +1776,7 @@ async def analyze_url_and_generate_report(
     )
     
     # Generate premium PDF with full multi-model data
+    primary_condition = getattr(multi_response, 'primary_condition', "Pneumonia")
     local_pdf_path = await run_in_threadpool(
         pdf_generator.generate_report,
         adapter_response,
@@ -1784,7 +1786,9 @@ async def analyze_url_and_generate_report(
         saliency,  # Pass density saliency map
         localization_map,  # Contour-based localization
         detected_regions,  # Region metadata
-        condition_confidences  # Confidence scores per condition
+        condition_confidences,  # Confidence scores per condition
+        primary_condition,  # Primary detected condition
+        per_condition_maps  # Per-condition evidence maps
     )
     
     # LOCAL TESTING MODE: Skip S3 upload and database storage
