@@ -994,7 +994,7 @@ class ClinicalReportGenerator:
         # =====================================================================
         story.append(Paragraph("EXECUTIVE SUMMARY", self.styles['section_title']))
         story.extend(self._build_executive_summary(consensus_data, condition_confidences))
-        story.append(Spacer(1, 25))
+        story.append(Spacer(1, 15))  # Reduced from 25
         
         # Metadata section on page 1
         story.append(Paragraph("STUDY INFORMATION", self.styles['section_title']))
@@ -1018,14 +1018,14 @@ class ClinicalReportGenerator:
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('BACKGROUND', (0, 0), (-1, -1), self.colors['gray_50']),
             ('LINEBELOW', (0, 0), (-1, -2), 0.5, self.colors['gray_200']),
-            ('TOPPADDING', (0, 0), (-1, -1), 8),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('TOPPADDING', (0, 0), (-1, -1), 5),  # Reduced from 8
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),  # Reduced from 8
             ('LEFTPADDING', (0, 0), (-1, -1), 12),
         ]))
         story.append(meta_table)
-        story.append(Spacer(1, 15))
+        story.append(Spacer(1, 10))  # Reduced from 15
         
-        # Image Quality Assessment section
+        # Image Quality Assessment section (compact - all on same row or reduced padding)
         story.append(Paragraph("IMAGE QUALITY", self.styles['subsection_title']))
         quality_data = [
             ['Positioning', 'Adequate'],
@@ -1046,8 +1046,8 @@ class ClinicalReportGenerator:
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('BACKGROUND', (0, 0), (-1, -1), self.colors['success_light']),
             ('LINEBELOW', (0, 0), (-1, -2), 0.5, self.colors['gray_200']),
-            ('TOPPADDING', (0, 0), (-1, -1), 6),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),  # Reduced from 6
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),  # Reduced from 6
             ('LEFTPADDING', (0, 0), (-1, -1), 12),
         ]))
         story.append(quality_table)
