@@ -488,19 +488,30 @@ class ClinicalReportGenerator:
         # =========== PRIMARY FINDINGS ===========
         findings_content = []
         
-        # Detected conditions (high confidence)
+        # Detected conditions (high confidence) - use qualitative likelihood, NOT percentages
         if detected_conditions:
-            detected_text = ", ".join([f"<b>{c[0]}</b> ({int(c[1]*100)}%)" for c in detected_conditions])
+            # Convert numeric confidence to qualitative likelihood
+            def get_likelihood(conf):
+                if conf >= 0.85:
+                    return "High likelihood"
+                elif conf >= 0.7:
+                    return "Moderate likelihood"
+                else:
+                    return "Possible"
+            
+            detected_items = [f"<b>{c[0]}</b> — {get_likelihood(c[1])}" for c in detected_conditions]
+            detected_text = "<br/>".join(detected_items)
             findings_content.append([Paragraph(
-                f"<font color='#EF4444'>⚠ DETECTED:</font> {detected_text}",
+                f"<font color='#EF4444'>⚠ DETECTED:</font><br/>{detected_text}",
                 self.styles['body']
             )])
         
-        # Possible conditions (medium confidence)
+        # Possible conditions (medium confidence) - use qualitative labels
         if possible_conditions:
-            possible_text = ", ".join([f"{c[0]} ({int(c[1]*100)}%)" for c in possible_conditions])
+            possible_items = [f"{c[0]} — Possible" for c in possible_conditions]
+            possible_text = "<br/>".join(possible_items)
             findings_content.append([Paragraph(
-                f"<font color='#F59E0B'>⚡ POSSIBLE:</font> {possible_text}",
+                f"<font color='#F59E0B'>⚡ POSSIBLE:</font><br/>{possible_text}",
                 self.styles['body']
             )])
         
@@ -813,11 +824,28 @@ class ClinicalReportGenerator:
         clinical_impression = consensus_data.get('clinical_impression', '') if consensus_data else ''
         confidence = consensus_data.get('medgemma_confidence', 'N/A') if consensus_data else 'N/A'
         
-        # Analysis confidence badge (single model)
+        # Analysis confidence badge (single model) - use stability descriptor, NOT percentage
         badge_color = self.colors['accent']
         badge_bg = self.colors['accent_light']
         badge_text = "AI ANALYSIS COMPLETE"
-        badge_desc = f"MedGemma-4B-IT analysis confidence: {confidence}"
+        
+        # Convert confidence to stability descriptor (avoid implying diagnostic certainty)
+        if confidence and confidence != 'N/A':
+            try:
+                # Handle percentage string like "95.0%"
+                conf_val = float(str(confidence).replace('%', '')) / 100 if '%' in str(confidence) else float(confidence)
+                if conf_val >= 0.85:
+                    stability = "High"
+                elif conf_val >= 0.7:
+                    stability = "Moderate"
+                else:
+                    stability = "Preliminary"
+            except (ValueError, TypeError):
+                stability = "Completed"
+        else:
+            stability = "Completed"
+        
+        badge_desc = f"Model inference stability: {stability}"
         
         badge_content = [
             [Paragraph(f"<b>{badge_text}</b>", ParagraphStyle(
