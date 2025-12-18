@@ -1150,31 +1150,30 @@ class ClinicalReportGenerator:
         story.append(PageBreak())
         
         # =====================================================================
-        # PAGE 4: DIAGNOSTIC PROBABILITY
+        # DIAGNOSTIC PROBABILITY + CONDITION SCREENING (same page)
         # =====================================================================
         story.append(Paragraph("DIAGNOSTIC PROBABILITY", self.styles['section_title']))
-        story.append(Spacer(1, 10))
+        story.append(Spacer(1, 8))
         story.extend(self._build_diagnostic_probability(condition_confidences))
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 20))
         
         story.append(Paragraph("CONDITION SCREENING", self.styles['section_title']))
-        story.append(Spacer(1, 10))
+        story.append(Spacer(1, 8))
         story.append(self._build_condition_cards(condition_confidences, abnormalities, primary_condition))
-        
-        story.append(PageBreak())
+        story.append(Spacer(1, 20))
         
         # =====================================================================
-        # PAGE 5: CLINICAL IMPRESSION & RECOMMENDATIONS
+        # AI ANALYSIS + CLINICAL RECOMMENDATIONS (combined, no extra page break)
         # =====================================================================
         story.append(Paragraph("AI ANALYSIS", self.styles['section_title']))
-        story.append(Spacer(1, 10))
+        story.append(Spacer(1, 8))
         story.extend(self._build_clinical_impression(consensus_data))
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 20))
         
         story.append(Paragraph("CLINICAL RECOMMENDATIONS", self.styles['section_title']))
-        story.append(Spacer(1, 10))
+        story.append(Spacer(1, 8))
         story.extend(self._build_recommendations())
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 15))
         
         # Attestation
         story.append(HRFlowable(width="100%", thickness=1, color=self.colors['gray_200']))
