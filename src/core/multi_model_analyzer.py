@@ -282,7 +282,7 @@ class MultiModelAnalyzer:
         
         # Generate saliency map (density-based - kept for reference)
         if self.medgemma is not None:
-            saliency_map = self.medgemma._generate_density_saliency_map(image)
+            saliency_map = self.medgemma.generate_density_saliency_map(image)
             logger.info("Generated density-based saliency map")
         else:
             saliency_map = primary_heatmap
@@ -299,7 +299,7 @@ class MultiModelAnalyzer:
             logger.info(f"Using GradCAM localization map: {len(detected_regions)} regions")
         elif self.medgemma is not None and medgemma_raw_heatmap_np is not None:
             # Fallback to old localization method
-            localization_map, detected_regions = self.medgemma._generate_localization_map(
+            localization_map, detected_regions = self.medgemma.generate_localization_map(
                 medgemma_raw_heatmap_np, image
             )
             logger.info(f"Generated localization map with {len(detected_regions)} regions")
