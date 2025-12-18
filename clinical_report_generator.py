@@ -592,14 +592,21 @@ class ClinicalReportGenerator:
             legend_items = []
             for i, region in enumerate(detected_regions[:5], 1):
                 evidence_score = region.get('evidence_score', region.get('intensity', 0))
-                score_display = f"{int(evidence_score * 100)}%"
+                
+                # Convert numeric score to qualitative strength descriptor
+                if evidence_score >= 0.8:
+                    strength_label = "High"
+                elif evidence_score >= 0.5:
+                    strength_label = "Moderate"
+                else:
+                    strength_label = "Low"
                 
                 # Use qualitative label if available (Primary/Secondary)
                 conf_label = region.get('label', f"Region {i}")
                 location = region.get('location', 'Unknown Location')
                 
                 legend_items.append(
-                    f"<b>{conf_label}:</b> {location} — Evidence Strength: {score_display}"
+                    f"<b>{conf_label}:</b> {location} — Evidence Strength: {strength_label}"
                 )
             legend_text = "<br/>".join(legend_items)
         else:
@@ -610,7 +617,7 @@ class ClinicalReportGenerator:
             [Paragraph(legend_text, self.styles['body'])],
             [Spacer(1, 8)],
             [Paragraph("<i>Regions contributing most to the AI finding shown.</i>", self.styles['body_small'])],
-            [Paragraph("<i>Percentages reflect relative contribution to the AI finding, not disease extent.</i>", self.styles['body_small'])],
+            [Paragraph("<i>Evidence strength indicates relative contribution to the AI finding (High/Moderate/Low).</i>", self.styles['body_small'])],
         ]
         
         legend_table = Table(legend_content, colWidths=[legend_width - 20])
@@ -732,10 +739,11 @@ class ClinicalReportGenerator:
         for cond_name, cond_key in conditions:
             confidence = condition_confidences.get(cond_key, 0) if condition_confidences else 0
             
-            # Clinical Requirement: Only report condition if AI Evidence Map fits (primary_condition)
-            # Otherwise downgrade to negative/screened
-            detected = (confidence >= 0.7) and (cond_key == primary_condition)
+            # Show DETECTED if confidence >= 0.5 (50%) threshold
+            # This uses the actual MedGemma output confidence, not just primary_condition
+            detected = confidence >= 0.5
             
+            # Also check if model explicitly detected it in abnormalities
             model_detected = is_detected(abnormalities, cond_key)
             
             if detected:
@@ -749,8 +757,15 @@ class ClinicalReportGenerator:
                 status_text = "CLEAR"
                 icon = "✓"
             
-            # Confidence display
-            conf_pct = int(confidence * 100)
+            # Convert confidence to qualitative stability descriptor (avoid raw percentages)
+            if confidence >= 0.85:
+                stability_label = "High Certainty"
+            elif confidence >= 0.7:
+                stability_label = "Moderate Certainty"
+            elif confidence >= 0.5:
+                stability_label = "Low Certainty"
+            else:
+                stability_label = "Screening Only"
             
             card_content = [
                 [Paragraph(f"<b>{cond_name}</b>", ParagraphStyle(
@@ -761,7 +776,7 @@ class ClinicalReportGenerator:
                     'CardStatus', parent=self.styles['body'],
                     alignment=TA_CENTER, textColor=border_color, fontSize=12
                 ))],
-                [Paragraph(f"Confidence: {conf_pct}%", ParagraphStyle(
+                [Paragraph(f"{stability_label}", ParagraphStyle(
                     'CardMeta', parent=self.styles['body_small'],
                     alignment=TA_CENTER
                 ))],

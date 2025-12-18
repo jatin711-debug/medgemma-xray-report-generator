@@ -103,13 +103,14 @@ class MultiModelAnalyzer:
         self, 
         image: Image.Image
     ) -> Tuple[MultiModelAnalysisResponse, Image.Image, Image.Image, Image.Image, 
-               Image.Image, Image.Image, Optional[Image.Image], list, Dict[str, float]]:
+               Image.Image, Image.Image, Optional[Image.Image], list, Dict[str, float], Dict[str, Any]]:
         """
         Run MedGemma analysis and generate visualizations.
         
         Returns:
             Tuple of (response, original_image, heatmap, saliency_map, probability_map, 
-                      segmentation_map, localization_map, detected_regions, condition_confidences)
+                      segmentation_map, localization_map, detected_regions, condition_confidences,
+                      per_condition_maps)
         """
         analysis_id = str(uuid.uuid4())
         timestamp = datetime.now().isoformat()
@@ -169,8 +170,12 @@ class MultiModelAnalyzer:
             NEGATIVE_PHRASES = ["no evidence", "not detected", "no sign", "negative for", 
                                "absent", "no ", "without", "unremarkable", "clear"]
             
-            def is_condition_detected(abnorm_list, keywords):
-                """Check if condition is positively detected (not negated)."""
+            def extract_confidence_from_abnormality(abnorm_list, keywords):
+                """
+                Extract the actual confidence percentage from abnormality strings like 'Pneumothorax (95%)'.
+                Returns (is_detected: bool, confidence: float 0.0-1.0)
+                """
+                import re
                 for abnorm in abnorm_list:
                     abnorm_lower = abnorm.lower()
                     
@@ -178,45 +183,88 @@ class MultiModelAnalyzer:
                         if keyword in abnorm_lower:
                             # Check if this is a NEGATIVE mention
                             is_negative = any(neg in abnorm_lower for neg in NEGATIVE_PHRASES)
-                            if not is_negative:
-                                return True
-                return False
+                            if is_negative:
+                                continue  # Skip negative mentions
+                            
+                            # This is a POSITIVE detection - extract the confidence percentage
+                            # Pattern matches "Pneumothorax (95%)" or "Pneumonia (85%)"
+                            match = re.search(r'\((\d+(?:\.\d+)?)\s*%?\)', abnorm)
+                            if match:
+                                confidence = float(match.group(1)) / 100.0  # Convert 95 -> 0.95
+                                return True, confidence
+                            else:
+                                # Detected but no explicit percentage - default to high confidence
+                                return True, 0.85
+                
+                # Not detected in abnormalities list
+                return False, 0.08
             
             for condition_name, keywords in TRACKED_CONDITIONS.items():
-                detected = is_condition_detected(abnormalities_text, keywords)
-                condition_confidences[condition_name] = 0.75 if detected else 0.08
+                detected, confidence = extract_confidence_from_abnormality(abnormalities_text, keywords)
+                condition_confidences[condition_name] = confidence
             
             logger.info(f"Abnormalities: {abnormalities_text}")
             logger.info(f"Extracted condition confidences: {condition_confidences}")
         
         # =========================================================================
         # HEATMAP GENERATION: GradCAM (preferred) or Attention-based (fallback)
+        # Generate evidence maps for ALL detected conditions
         # =========================================================================
+        per_condition_maps = {}  # Dict: condition -> (heatmap, localization, regions)
         gradcam_heatmap = None
         gradcam_raw = None
         gradcam_regions = []
+        gradcam_localization = None
         
-        # Determine target condition for evidence map
+        # Determine target condition for primary evidence map (highest confidence detected)
         target_condition = "pneumonia"  # Default
+        detected_conditions = []  # Conditions with confidence >= 0.5
+        
         if condition_confidences:
-            # Use the highest-confidence condition
+            # Find all detected conditions (>= 0.5 confidence)
+            detected_conditions = [
+                cond for cond, conf in condition_confidences.items() 
+                if conf >= 0.5
+            ]
+            # Use highest-confidence for primary map
             top_condition = max(condition_confidences.items(), key=lambda x: x[1])
             target_condition = top_condition[0]
         
-        # Try GradCAM first (condition-specific evidence map)
+        # Generate GradCAM for each detected condition
         if self.gradcam is not None and medgemma_success:
-            try:
-                logger.info(f"🎯 Generating clinical GradCAM for: {target_condition}")
-                # 4 returns: (ai_evidence_map, localization_map, raw_cam, regions)
-                gradcam_heatmap, gradcam_localization, gradcam_raw, gradcam_regions = self.gradcam.generate_cam(image, target_condition)
-                
-                if gradcam_heatmap is not None:
-                    logger.info(f"✅ Clinical GradCAM: {len(gradcam_regions)} regions detected")
-            except Exception as e:
-                logger.warning(f"GradCAM generation failed, falling back to attention: {e}")
-                gradcam_heatmap = None
-                gradcam_localization = None
-                gradcam_regions = []
+            for condition in detected_conditions:
+                try:
+                    logger.info(f"🎯 Generating clinical GradCAM for: {condition}")
+                    # 4 returns: (ai_evidence_map, localization_map, raw_cam, regions)
+                    cond_heatmap, cond_localization, cond_raw, cond_regions = self.gradcam.generate_cam(image, condition)
+                    
+                    if cond_heatmap is not None:
+                        per_condition_maps[condition] = {
+                            'heatmap': cond_heatmap,
+                            'localization': cond_localization,
+                            'raw': cond_raw,
+                            'regions': cond_regions
+                        }
+                        logger.info(f"✅ Clinical GradCAM for {condition}: {len(cond_regions)} regions detected")
+                        
+                        # Set primary evidence map to the top condition
+                        if condition == target_condition:
+                            gradcam_heatmap = cond_heatmap
+                            gradcam_localization = cond_localization
+                            gradcam_raw = cond_raw
+                            gradcam_regions = cond_regions
+                except Exception as e:
+                    logger.warning(f"GradCAM generation failed for {condition}: {e}")
+            
+            # If no primary was set but we have maps, use the first available
+            if gradcam_heatmap is None and per_condition_maps:
+                first_cond = list(per_condition_maps.keys())[0]
+                maps = per_condition_maps[first_cond]
+                gradcam_heatmap = maps['heatmap']
+                gradcam_localization = maps['localization']
+                gradcam_raw = maps['raw']
+                gradcam_regions = maps['regions']
+                target_condition = first_cond
         
         # Choose primary heatmap: GradCAM > Attention > Placeholder
         if gradcam_heatmap is not None:
@@ -272,8 +320,12 @@ class MultiModelAnalyzer:
             primary_condition=target_condition
         )
         
+        # Log per-condition maps generated
+        if per_condition_maps:
+            logger.info(f"📊 Per-condition evidence maps generated: {list(per_condition_maps.keys())}")
+        
         return (response, image, primary_heatmap, saliency_map, probability_map, 
-                segmentation_map, localization_map, detected_regions, condition_confidences)
+                segmentation_map, localization_map, detected_regions, condition_confidences, per_condition_maps)
     
     def _aggregate_findings(
         self,

@@ -1646,7 +1646,7 @@ async def analyze_and_generate_report(
     
     # Perform analysis with Multi-Model Analyzer (supports GradCAM)
     (analysis_response, original_image, heatmap_image, saliency_map, probability_map, 
-     segmentation_map, localization_map, detected_regions, condition_confidences) = \
+     segmentation_map, localization_map, detected_regions, condition_confidences, per_condition_maps) = \
         await multi_analyzer.analyze_image_from_upload(file)
     
     # helper to unpack consensus for report generator
@@ -1728,7 +1728,7 @@ async def analyze_url_and_generate_report(
     """
     # Perform MULTI-MODEL analysis - uses both MedGemma and NV-Reason-CXR
     (multi_response, original_image, heatmap, saliency, probability, segmentation,
-     localization_map, detected_regions, condition_confidences) = \
+     localization_map, detected_regions, condition_confidences, per_condition_maps) = \
         await multi_analyzer.analyze_image_from_url(str(request.image_url))
     
     # Create adapter response for PDF generator (expects AnalysisResponse format)
