@@ -85,7 +85,7 @@ class MultiModelAnalyzer:
                 # Initialize GradCAM after model is loaded
                 if self.medgemma.model_loaded:
                     try:
-                        from gradcam_analyzer import MedGemmaGradCAM
+                        from src.visualization.gradcam_analyzer import MedGemmaGradCAM
                         self.gradcam = MedGemmaGradCAM(
                             self.medgemma.model, 
                             self.medgemma.processor
