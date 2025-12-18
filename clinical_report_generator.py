@@ -1059,8 +1059,13 @@ class ClinicalReportGenerator:
             cond_name = cond_info['name']
             cond_heatmap = cond_info['heatmap']
             
-            # Add subsection header if multiple conditions
-            if len(conditions_to_render) > 1:
+            # Add page break before subsequent conditions so heading stays with content
+            if len(conditions_to_render) > 1 and i > 0:
+                story.append(PageBreak())
+                story.append(Paragraph(f"{cond_name.upper()} EVIDENCE", self.styles['section_title']))
+                story.append(Spacer(1, 10))
+            elif len(conditions_to_render) > 1:
+                # First condition gets subsection header
                 story.append(Paragraph(f"<b>{cond_name} Evidence</b>", self.styles['subsection_title']))
                 story.append(Spacer(1, 5))
             
@@ -1092,8 +1097,13 @@ class ClinicalReportGenerator:
             cond_regions = cond_info.get('regions', [])
             
             if cond_localization is not None:
-                # Add subsection header if multiple conditions
-                if len(conditions_to_render) > 1:
+                # Add page break before subsequent conditions so heading stays with content
+                if len(conditions_to_render) > 1 and i > 0:
+                    story.append(PageBreak())
+                    story.append(Paragraph(f"{cond_name.upper()} LOCALIZATION", self.styles['section_title']))
+                    story.append(Spacer(1, 10))
+                elif len(conditions_to_render) > 1:
+                    # First condition gets subsection header
                     story.append(Paragraph(f"<b>{cond_name}</b>", self.styles['subsection_title']))
                     story.append(Spacer(1, 5))
                 

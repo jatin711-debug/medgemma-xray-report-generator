@@ -663,28 +663,30 @@ class MedGemmaGradCAM:
         pure_heatmap = (alpha_3ch * heatmap + (1 - alpha_3ch) * original_np).astype(np.uint8)
         
         # =====================================================
-        # STEP 7: Create LOCALIZATION MAP with contours
+        # STEP 7: Create LOCALIZATION MAP with contours on GRAYSCALE
+        # (Clinical standard: green contours on grayscale X-ray, NOT colorful heatmap)
         # =====================================================
-        # Copy the blended image for localization (with contours)
-        localization_map = pure_heatmap.copy()
+        # Convert original to grayscale and back to RGB for contour drawing
+        original_gray = cv2.cvtColor(original_np, cv2.COLOR_RGB2GRAY)
+        localization_map = cv2.cvtColor(original_gray, cv2.COLOR_GRAY2RGB)
         
         for idx, region in enumerate(top_regions):
             contour = region["contour"]
-            # Green contour for detected regions
-            cv2.drawContours(localization_map, [contour], -1, (0, 255, 0), 2)
+            # Green contour for detected regions (thicker line)
+            cv2.drawContours(localization_map, [contour], -1, (0, 255, 0), 3)
             
-            # Use qualitative label (Primary/Secondary) instead of R1/R2
+            # Use qualitative label (Primary/Secondary)
             cx, cy = region["centroid"]
             label = region.get("label", "Primary" if idx == 0 else "Secondary")
             
-            # Draw label with background
-            (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
-            cv2.rectangle(localization_map, (cx - 2, cy - lh - 4), (cx + lw + 4, cy + 4), (0, 0, 0), -1)
-            cv2.putText(localization_map, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            # Draw label with black background
+            (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.rectangle(localization_map, (cx - 4, cy - lh - 6), (cx + lw + 6, cy + 6), (0, 0, 0), -1)
+            cv2.putText(localization_map, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         
         logger.info(f"Clinical CAM: lung-masked, top-20%, {len(top_regions)} regions")
         
-        # Return BOTH images: pure heatmap for AI Evidence, localization with contours
+        # Return BOTH images: pure heatmap for AI Evidence, localization with contours on grayscale
         return Image.fromarray(pure_heatmap), Image.fromarray(localization_map), top_regions
     
     def _get_anatomical_location(self, x: int, y: int, w: int, h: int) -> str:
