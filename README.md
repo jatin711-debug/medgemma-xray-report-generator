@@ -33,3 +33,9 @@ The PDF path refers to the server filesystem; this prototype does not provide a 
 The application accepts ordinary image formats, not DICOM studies. Model access, library versions, hardware and GPU quantization can affect whether inference works. The URL-to-S3/MySQL integration is experimental and needs external services. There is no production deployment configuration or validated test dataset in this repository. Contributions and independent evaluation are welcome.
 
 The model is distributed under its own license and access terms; this repository does not currently specify a code license.
+
+## Code structure
+
+`src/api/` contains the API and request/response schemas, `src/core/` contains the MedGemma analyzer, and `src/reports/` contains PDF generation. `main.py` remains the compatible server entry point. The older multi-condition and Grad-CAM work remains in the `dev` branch and is not part of this workflow.
+
+Run the lightweight API and parser checks with `python -m unittest discover -s tests`. These checks use a mocked analyzer and do not validate model inference or clinical performance.

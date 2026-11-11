@@ -19,4 +19,4 @@ boto3
 opencv-python
 numpy
 bitsandbytes
-accelerate
+httpx
