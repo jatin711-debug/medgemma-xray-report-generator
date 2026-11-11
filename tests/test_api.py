@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 from pathlib import Path
 import unittest
@@ -21,6 +22,19 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(analyzer.parse_ai_response('**Finding**: Pneumothorax detected').impression,
                          'Pneumothorax Detected')
 
+    def test_full_precision_option_disables_quantization(self):
+        analyzer = MedicalImageAnalyzer()
+        with patch.dict('os.environ', {'MEDGEMMA_QUANTIZE': '0'}), \
+             patch('src.core.medical_analyzer.torch.cuda.is_available', return_value=True), \
+             patch.object(analyzer, 'get_system_memory_info', return_value='test'), \
+             patch('src.core.medical_analyzer.AutoProcessor.from_pretrained'), \
+             patch('src.core.medical_analyzer.AutoModelForImageTextToText.from_pretrained') as load, \
+             patch('src.core.medical_analyzer.BitsAndBytesConfig') as quantization:
+            asyncio.run(analyzer.load_model())
+        self.assertTrue(analyzer.model_loaded)
+        self.assertIsNone(load.call_args.kwargs['quantization_config'])
+        quantization.assert_not_called()
+
     def test_upload_endpoint_passes_analysis_to_report(self):
         findings = RadiologyFindings(anatomical_structures=[], abnormalities=[],
                                      impression='Indeterminate', recommendations=[], confidence_level='N/A')
@@ -30,11 +44,11 @@ class AnalysisTests(unittest.TestCase):
 
         class Analyzer:
             async def analyze_image_from_upload(self, file):
-                return result, image, None, None, None, None
+                return result, image
 
         class Generator:
-            def generate_pdf_report(self, response, original, *maps):
-                assert response.analysis_id == 'test-id' and original is image and len(maps) == 4
+            def generate_pdf_report(self, response, original):
+                assert response.analysis_id == 'test-id' and original is image
                 return 'reports/test.pdf'
 
         with patch.object(api, 'analyzer', Analyzer()), patch.object(api, 'pdf_generator', Generator()):
@@ -51,7 +65,7 @@ class AnalysisTests(unittest.TestCase):
                                   raw_response='Uncertain <finding>', image_metadata={})
         with tempfile.TemporaryDirectory() as directory:
             generator = api.UltimatePDFGenerator(directory)
-            path = generator.generate_pdf_report(result, Image.new('RGB', (64, 64)), None, None, None, None)
+            path = generator.generate_pdf_report(result, Image.new('RGB', (64, 64)))
             self.assertTrue(Path(path).read_bytes().startswith(b'%PDF'))
 
     def test_url_fetch_disabled_by_default(self):

@@ -75,15 +75,14 @@ async def analyze_and_generate_report(
     if not (file.content_type or "").startswith('image/'):
         raise HTTPException(status_code=400, detail="File must be an image")
     
-    # Perform analysis once - this includes heatmap generation
-    analysis_response, original_image, heatmap_image, saliency_map, probability_map, segmentation_map = await analyzer.analyze_image_from_upload(file)
+    # Perform analysis once
+    analysis_response, original_image = await analyzer.analyze_image_from_upload(file)
     
     # Generate PDF in thread pool to avoid blocking the event loop
     pdf_path = await run_in_threadpool(
         pdf_generator.generate_pdf_report,
         analysis_response,
-        original_image,
-        heatmap_image, saliency_map, probability_map, segmentation_map
+        original_image
     )
     
     return PDFGenerationResponse(
@@ -142,7 +141,7 @@ async def analyze_image_url(request: ImageURLRequest):
         - Timeout protection
         - Protocol validation (HTTP/HTTPS only)
     """
-    analysis_response, *_ = await analyzer.analyze_image_from_url(str(request.image_url))
+    analysis_response, _ = await analyzer.analyze_image_from_url(str(request.image_url))
     return analysis_response
 
 # The working path for the PDF report generation
@@ -168,18 +167,14 @@ async def analyze_url_and_generate_report(
         - Memory-conscious processing pipeline
         - Single AI inference run (no duplicate processing)
     """
-    # Perform analysis once - this includes heatmap generation
-    analysis_response, original_image, heatmap_image, saliency_map, probability_map, segmentation_map  = await analyzer.analyze_image_from_url(str(request.image_url))
+    # Perform analysis once
+    analysis_response, original_image = await analyzer.analyze_image_from_url(str(request.image_url))
     
     # Generate PDF in thread pool to avoid blocking the event loop
     local_pdf_path = await run_in_threadpool(
         pdf_generator.generate_pdf_report,
         analysis_response,
-        original_image,
-        heatmap_image,
-        saliency_map,
-        probability_map,
-        segmentation_map
+        original_image
     )
     
     # Define S3 bucket details (replace with your actual configuration)

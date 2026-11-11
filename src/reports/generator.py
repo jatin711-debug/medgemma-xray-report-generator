@@ -602,12 +602,8 @@ class UltimatePDFGenerator:
 
     def generate_pdf_report(self,
                             analysis_response,
-                            original_image: Image.Image,
-                            ai_attention_heatmap_image: Image.Image,
-                            new_saliency_map_image: Image.Image,
-                            probability_map_image: Image.Image,
-                            segmentation_map_image: Image.Image) -> str:
-        """Generate the most beautiful medical PDF report ever created, now with more maps!"""
+                            original_image: Image.Image) -> str:
+        """Generate an experimental research PDF report."""
         
         filename = f"premium_medical_report_{analysis_response.analysis_id}.pdf"
         filepath = os.path.join(self.reports_dir, filename)

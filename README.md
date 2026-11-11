@@ -11,7 +11,9 @@ The response parser accepts only the requested exact finding format; other respo
 1. Use a recent Python version (Python 3.10 or newer), install dependencies with `pip install -r requirements.txt`, and configure PyTorch for your hardware. A capable GPU is recommended; CPU inference may be slow and memory intensive.
 2. Request/accept access to the model and its license on the [model page](https://huggingface.co/google/medgemma-1.5-4b-it), then authenticate with Hugging Face (for example, `hf auth login`). Model download requires network access and substantial storage.
 3. Optionally copy `samplenv` to `.env`. `MODEL_ID` selects the model; most other sample settings are not currently wired into the application. The local upload workflow does not require S3 or MySQL.
-4. Run `uvicorn main:app --host 127.0.0.1 --port 8000` and open `http://127.0.0.1:8000/docs`. Startup loads the model and can take time.
+4. Run `uvicorn main:app --host 127.0.0.1 --port 8000` (or `python app.py`) and open `http://127.0.0.1:8000/docs`. Startup loads the model and can take time.
+
+The launcher accepts `--host`, `--port`, `--reload`, `--quantize`, and `--no-quantize`. The default is 4-bit quantization on CUDA and full precision on CPU; use `MEDGEMMA_QUANTIZE=0` or `--no-quantize` for full precision on CUDA. Model loading still depends on your hardware and installed libraries.
 
 ## API
 
@@ -36,6 +38,6 @@ The model is distributed under its own license and access terms; this repository
 
 ## Code structure
 
-`src/api/` contains the API and request/response schemas, `src/core/` contains the MedGemma analyzer, and `src/reports/` contains PDF generation. `main.py` remains the compatible server entry point. The older multi-condition and Grad-CAM work remains in the `dev` branch and is not part of this workflow.
+`src/api/` contains the API and request/response schemas, `src/core/` contains the MedGemma analyzer, and `src/reports/` contains PDF generation. `main.py` remains the compatible server entry point. The multi-condition and Grad-CAM experiments are not part of the current workflow.
 
 Run the lightweight API and parser checks with `python -m unittest discover -s tests`. These checks use a mocked analyzer and do not validate model inference or clinical performance.
