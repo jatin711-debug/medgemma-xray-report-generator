@@ -11,7 +11,7 @@ HOST=127.0.0.1
 PORT=8000
 
 # Model Configuration
-MODEL_ID=google/medgemma-4b-it
+MODEL_ID=google/medgemma-1.5-4b-it
 MAX_TOKENS=512
 TEMPERATURE=0.7
 

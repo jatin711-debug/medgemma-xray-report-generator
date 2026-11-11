@@ -1,225 +1,35 @@
-# Medical Image Analysis API
+# MedGemma Chest X-ray Report Generator — Experimental Beta
 
-A production-level FastAPI backend for medical image analysis using Google's MedGemma model. This API provides structured radiology reports and PDF generation capabilities.
+> **Research and educational prototype only.** This project is experimental, unvalidated, and not intended for diagnosis, clinical decisions, patient care, or production use. Model outputs can be wrong or indeterminate. Do not upload real patient data without appropriate authorization and safeguards.
 
-## Features
+A FastAPI prototype that sends a single chest X-ray image to MedGemma and produces a PDF containing the model's pneumothorax assessment. It is a software experiment, not a validated medical device. The default model is [MedGemma 1.5 4B](https://huggingface.co/google/medgemma-1.5-4b-it); see the [technical report](https://arxiv.org/html/2604.05081v2). The model's wider capabilities are not implemented by this application.
 
-- 🏥 Medical image analysis using Google MedGemma-4B-IT model
-- 📊 Structured radiology findings with confidence levels
-- 📄 Automatic PDF report generation
-- 🔗 RESTful API endpoints
-- 📝 Comprehensive logging and error handling
-- 🐳 Docker support for deployment
+The response parser accepts only the requested exact finding format; other responses are marked indeterminate. Confidence scores are not calibrated. Earlier experimental attention-derived visualizations are omitted from reports because they are not validated probability or segmentation maps.
 
-## Windows Setup Instructions
+## Setup
 
-### Prerequisites
+1. Use a recent Python version (Python 3.10 or newer), install dependencies with `pip install -r requirements.txt`, and configure PyTorch for your hardware. A capable GPU is recommended; CPU inference may be slow and memory intensive.
+2. Request/accept access to the model and its license on the [model page](https://huggingface.co/google/medgemma-1.5-4b-it), then authenticate with Hugging Face (for example, `hf auth login`). Model download requires network access and substantial storage.
+3. Optionally copy `samplenv` to `.env`. `MODEL_ID` selects the model; most other sample settings are not currently wired into the application. The local upload workflow does not require S3 or MySQL.
+4. Run `uvicorn main:app --host 127.0.0.1 --port 8000` and open `http://127.0.0.1:8000/docs`. Startup loads the model and can take time.
 
-1. **Python 3.8+** - Download from [python.org](https://www.python.org/downloads/)
-2. **Git** (optional) - Download from [git-scm.com](https://git-scm.com/)
-3. **CUDA-compatible GPU** (recommended for faster inference)
+## API
 
-### Quick Start (Windows)
+- `POST /analyze-and-report`: multipart `file` image upload; creates a local PDF under `reports/` and returns its path and analysis ID.
+- `GET /reports`: lists locally generated PDFs.
+- `GET /model-status` and `POST /load-model`: inspect or reload the model.
+- `POST /analyze-url` and `POST /analyze-url-and-report`: URL workflows. Disabled by default; `ENABLE_URL_FETCH=true` enables them. URL fetching is not protected against access to private/internal addresses, so enable it only in a trusted, isolated environment. The report URL workflow also requires configured AWS S3 and MySQL services and an existing `xray_reports` table; see `db.py` for its schema.
 
-1. **Clone or download this project**
-2. **Open Command Prompt or PowerShell** in the project directory
-3. **Run the setup script:**
+Example (PowerShell):
 
-   **Option A: Using Batch File (Command Prompt)**
-   ```cmd
-   start_server.bat
-   ```
-
-   **Option B: Using PowerShell**
-   ```powershell
-   .\start_server.ps1
-   ```
-
-4. **Access the API:**
-   - API: http://localhost:8000
-   - Interactive Documentation: http://localhost:8000/docs
-   - Alternative Docs: http://localhost:8000/redoc
-
-### Manual Setup (Windows)
-
-If you prefer manual setup:
-
-```cmd
-# Create virtual environment
-python -m venv venv
-
-# Activate virtual environment
-venv\Scripts\activate.bat
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Create reports directory
-mkdir reports
-
-# Start the server
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/analyze-and-report -F "file=@path/to/chest-xray.png"
 ```
 
-## API Endpoints
+The PDF path refers to the server filesystem; this prototype does not provide a report download endpoint. API endpoints do not implement authentication, access control, or rate limiting. Keep the server local and use non-sensitive sample data. The model, prompt, parser, output and full application have not been clinically evaluated. Results should not be interpreted as medical advice.
 
-### 1. Health Check
-```
-GET /
-```
-Returns API status and health information.
+## Limitations and contributing
 
-### 2. Analyze Image
-```
-POST /analyze
-```
-Upload a medical image and get structured analysis results.
+The application accepts ordinary image formats, not DICOM studies. Model access, library versions, hardware and GPU quantization can affect whether inference works. The URL-to-S3/MySQL integration is experimental and needs external services. There is no production deployment configuration or validated test dataset in this repository. Contributions and independent evaluation are welcome.
 
-**Example using curl:**
-```cmd
-curl -X POST "http://localhost:8000/analyze" -F "file=@path\to\your\image.jpg"
-```
-
-### 3. Analyze and Generate Report
-```
-POST /analyze-and-report
-```
-Upload an image, analyze it, and generate a PDF report.
-
-### 4. Download Report
-```
-GET /download-report/{analysis_id}
-```
-Download a generated PDF report by analysis ID.
-
-### 5. List Reports
-```
-GET /reports
-```
-Get a list of all generated reports.
-
-## Using the Test Client
-
-A test client is provided in `test_client.py`. To use it:
-
-```python
-from test_client import MedicalImageAnalysisClient
-
-client = MedicalImageAnalysisClient()
-
-# Analyze an image
-result = client.analyze_image("path/to/your/image.jpg")
-print(result)
-
-# Generate a report
-report = client.analyze_and_generate_report("path/to/your/image.jpg")
-print(f"Report generated: {report}")
-```
-
-## Response Format
-
-The API returns structured responses with the following format:
-
-```json
-{
-  "analysis_id": "uuid",
-  "timestamp": "2025-06-04T10:30:00",
-  "findings": {
-    "anatomical_structures": ["list of identified structures"],
-    "abnormalities": ["list of detected abnormalities"],
-    "impression": "clinical impression summary",
-    "recommendations": ["list of recommendations"],
-    "confidence_level": "High/Medium/Low"
-  },
-  "raw_response": "complete AI model response",
-  "image_metadata": {
-    "filename": "image.jpg",
-    "size": 1024000,
-    "format": "JPEG",
-    "dimensions": [512, 512]
-  }
-}
-```
-
-## PDF Reports
-
-Generated PDF reports include:
-- Analysis metadata (ID, timestamp, confidence)
-- Structured findings sections
-- Clinical impression
-- Recommendations
-- Complete AI analysis text
-
-Reports are saved in the `reports/` directory with the naming pattern: `medical_report_{analysis_id}.pdf`
-
-## Production Deployment
-
-### Docker (Recommended)
-
-```cmd
-# Build the image
-docker build -t medical-image-api .
-
-# Run the container
-docker run -p 8000:8000 -v %cd%\reports:/app/reports medical-image-api
-```
-
-### Environment Configuration
-
-Copy `.env.example` to `.env` and modify settings as needed:
-
-```bash
-cp .env.example .env
-```
-
-## Hardware Requirements
-
-- **Minimum:** 8GB RAM, CPU-only inference
-- **Recommended:** 16GB+ RAM, NVIDIA GPU with 8GB+ VRAM
-- **Storage:** 10GB+ for model files and reports
-
-## Troubleshooting
-
-### Common Issues on Windows
-
-1. **PowerShell Execution Policy Error:**
-   ```powershell
-   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-   ```
-
-2. **CUDA/GPU Issues:**
-   - Install NVIDIA drivers and CUDA toolkit
-   - Or set `device_map="cpu"` in config for CPU-only inference
-
-3. **Port Already in Use:**
-   - Change port in config.py or use: `uvicorn main:app --port 8001`
-
-4. **Large Model Download:**
-   - First run downloads ~8GB model files
-   - Ensure stable internet connection
-
-### Performance Tips
-
-- Use GPU acceleration when available
-- Adjust `max_tokens` in config for shorter/longer responses
-- Monitor memory usage with large batch processing
-
-## Security Considerations
-
-For production deployment:
-- Change default CORS settings
-- Add authentication/authorization
-- Use HTTPS
-- Implement rate limiting
-- Validate file uploads thoroughly
-
-## License
-
-This project is for educational and research purposes. Please review Google's MedGemma license terms for commercial use.
-
-## Support
-
-For issues and questions:
-1. Check the troubleshooting section above
-2. Review the interactive API documentation at `/docs`
-3. Check logs for detailed error information
+The model is distributed under its own license and access terms; this repository does not currently specify a code license.

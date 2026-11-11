@@ -33,14 +33,14 @@ logger = logging.getLogger(__name__)
 # Global analyzer instance
 analyzer = None
 
-from db import initialize_database, store_analysis_result
+from db import store_analysis_result
 from aws_utils import upload_to_s3 # Import the new S3 upload function
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown events."""
     # Startup
-    logger.info("Starting Medical Image Analysis API (Med-GEMMA-4 only)...")
+    logger.info("Starting Medical Image Analysis API (MedGemma experimental beta)...")
     global analyzer
     analyzer = MedicalImageAnalyzer()
     await analyzer.load_model()
@@ -50,8 +50,8 @@ async def lifespan(app: FastAPI):
 
 # Initialize FastAPI app with lifespan
 app = FastAPI(
-    title="Medical Image Analysis API (Med-GEMMA-4 only)",
-    description="AI-powered medical image analysis using Med-GEMMA-4",
+    title="Medical Image Analysis API (MedGemma experimental beta)",
+    description="AI-powered medical image analysis using MedGemma",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -105,7 +105,7 @@ class RadiologyFindings(BaseModel):
     abnormalities: list[str] = Field(description="Detected abnormalities or pathologies")
     impression: str = Field(description="Overall clinical impression")
     recommendations: list[str] = Field(description="Clinical recommendations")
-    confidence_level: str = Field(description="AI confidence level (High/Medium/Low)")
+    confidence_level: str = Field(description="Uncalibrated confidence; unavailable")
 
 
 class AnalysisResponse(BaseModel):
@@ -134,17 +134,17 @@ model_loading_error: Optional[str] = None
 
 class MedicalImageAnalyzer:
     """
-    Medical image analysis system using Med-GEMMA-4 for AI-powered radiology insights.
+    Medical image analysis system using MedGemma for AI-powered radiology insights.
     
     This class handles the complete pipeline for medical image analysis including:
     - Model loading and management with CPU/GPU optimization
     - Image preprocessing and validation
-    - AI-powered analysis using Med-GEMMA-4
+    - AI-powered analysis using MedGemma
     - PDF report generation
     - Memory management for optimal performance
     
     Attributes:
-        model_id: The Hugging Face model identifier for Med-GEMMA-4
+        model_id: The Hugging Face model identifier for MedGemma
         pipeline: The loaded transformers pipeline for image-text-to-text
         reports_dir: Directory for storing generated PDF reports
         max_image_size: Maximum allowed image size in bytes (10MB)
@@ -153,8 +153,8 @@ class MedicalImageAnalyzer:
     """
     
     def __init__(self):
-        # Only one model: Med-GEMMA-4
-        self.model_id = "google/medgemma-4b-it"
+        # Only one model: MedGemma
+        self.model_id = os.getenv("MODEL_ID", "google/medgemma-1.5-4b-it")
         self.processor: Optional[Any] = None
         self.model: Optional[Any] = None
         self.reports_dir = "reports"
@@ -202,9 +202,9 @@ class MedicalImageAnalyzer:
     
     async def load_model(self) -> None:
         """
-        Load the Med-GEMMA-4 model and processor with memory optimization.
+        Load the MedGemma model and processor with memory optimization.
         
-        This method handles the loading of the Med-GEMMA-4 model and its
+        This method handles the loading of the MedGemma model and its
         associated processor. It includes several optimizations for memory
         management, including:
         - 4-bit quantization to reduce model size
@@ -223,7 +223,7 @@ class MedicalImageAnalyzer:
         logger.info(f"Loading model on device: {device}")
         logger.info(f"System memory before loading: {self.get_system_memory_info()}")
 
-        # Configure 4-bit quantization
+        # Quantization is only enabled on CUDA.
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -234,8 +234,8 @@ class MedicalImageAnalyzer:
             self.processor = AutoProcessor.from_pretrained(self.model_id, use_fast=True)
             self.model = AutoModelForImageTextToText.from_pretrained(
                 self.model_id,
-                quantization_config=quantization_config,
-                torch_dtype=torch.bfloat16,
+                quantization_config=quantization_config if torch.cuda.is_available() else None,
+                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
                 attn_implementation="eager",  # Required for attention scores
                 device_map="auto"  # Automatically handle device placement
             )
@@ -255,6 +255,7 @@ class MedicalImageAnalyzer:
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            raise RuntimeError(model_loading_error) from e
     
     def parse_ai_response(self, raw_response: str) -> RadiologyFindings:
         """
@@ -263,41 +264,28 @@ class MedicalImageAnalyzer:
         This method intelligently extracts the finding and confidence level for pneumothorax.
         
         Args:
-            raw_response: Raw text output from the Med-GEMMA-4 model
+            raw_response: Raw text output from the MedGemma model
               Returns:
             RadiologyFindings: Structured medical findings for pneumothorax.
         """
-        try:
-            # Use regex to find confidence percentage
-            confidence_match = re.search(r'(\d+\.?\d*)\s?%', raw_response)
-            confidence = f"{confidence_match.group(1)}%" if confidence_match else "N/A"
+        # Accept only the exact requested finding line; everything else is uncertain.
+        match = re.search(r"(?im)^\s*\*\*Finding\*\*\s*:\s*(.*?)\s*$", raw_response)
+        value = match.group(1).strip().strip("* ").lower().rstrip(".") if match else ""
+        if value == "no pneumothorax detected":
+            impression = "No Pneumothorax Detected"
+            abnormalities = ["Model output: no pneumothorax detected."]
+        elif value == "pneumothorax detected":
+            impression = "Pneumothorax Detected"
+            abnormalities = ["Model output: pneumothorax detected."]
+        else:
+            impression = "Indeterminate"
+            abnormalities = ["The model response could not be classified reliably."]
+        return RadiologyFindings(
+            anatomical_structures=["Chest X-ray"], abnormalities=abnormalities,
+            impression=impression, recommendations=["Research use only; expert review required."],
+            confidence_level="Not available (uncalibrated)",
+        )
 
-            # Determine finding based on model output
-            if "no pneumothorax detected" in raw_response.lower():
-                finding = "No Pneumothorax Detected"
-                abnormalities = ["No evidence of pneumothorax found."]
-            else:
-                finding = "Pneumothorax Detected"
-                abnormalities = ["Evidence of pneumothorax found."]
-
-            return RadiologyFindings(
-                anatomical_structures=["Chest structures analyzed for pneumothorax."],
-                abnormalities=abnormalities,
-                impression=finding,
-                recommendations=["Clinical correlation and expert review is recommended."],
-                confidence_level=confidence
-            )
-            
-        except Exception as e:
-            logger.error(f"Error parsing AI response: {str(e)}")
-            return RadiologyFindings(
-                anatomical_structures=["Analysis completed"],
-                abnormalities=["Unable to parse detailed findings"],
-                impression=raw_response,
-                recommendations=["Manual review recommended"],
-                confidence_level="Not available"
-            )
-    
     async def analyze_image(self, image: Image.Image) -> tuple[str, RadiologyFindings, Image.Image, Image.Image, Image.Image, Image.Image]:
         """
         Perform AI-powered medical image analysis using Med-GEMMA.
@@ -308,7 +296,7 @@ class MedicalImageAnalyzer:
 
         try:
             # Resize image to match model input expectations (usually 224x224)
-            image_for_model = image.resize((224, 224))
+            image_for_model = image
 
             messages = [
                 {
@@ -324,10 +312,8 @@ class MedicalImageAnalyzer:
                                 "Review this chest X-ray carefully for signs of pneumothorax, including loss of lung markings, "
                                 "pleural line visibility, and increased radiolucency.\n\n"
                                 "Respond strictly in the following format:\n\n"
-                                "**Finding**: [Pneumothorax detected | No pneumothorax detected]\n"
-                                "**Confidence**: [XX%]\n"
-                                "**Brief Reasoning**: [One-sentence justification using clinical language]\n\n"
-                                "Keep the response within 2 lines total. Do not include any disclaimers or extra comments."
+                                "**Finding**: [Pneumothorax detected | No pneumothorax detected | Indeterminate]\n"
+                                "**Brief Reasoning**: [One-sentence justification]"
                             )
                         },
                         {"type": "image", "image": image_for_model}
@@ -341,96 +327,18 @@ class MedicalImageAnalyzer:
                 tokenize=True,
                 return_dict=True,
                 return_tensors="pt"
-            ).to(self.model.device, dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32)
+            ).to(self.model.device)
 
             input_len = inputs["input_ids"].shape[-1]
-            attentions = None
-
             with torch.inference_mode():
-                try:
-                    forward_outputs = self.model(
-                        **inputs,
-                        output_attentions=True,
-                        use_cache=False
-                    )
-                    if hasattr(forward_outputs, 'attentions') and forward_outputs.attentions:
-                        attentions = forward_outputs.attentions
-                        logger.info(f"✅ Got attentions from forward pass: {len(attentions)} layers")
-                    else:
-                        logger.warning("No attentions from forward pass")
-                except Exception as e:
-                    logger.warning(f"Forward pass failed: {e}")
-
-                generation_output = self.model.generate(
-                    **inputs,
-                    max_new_tokens=512,
-                    do_sample=False,
-                    output_attentions=True,
-                    return_dict_in_generate=True,
-                    use_cache=False
-                )
-
-                if attentions is None:
-                    attention_attrs = ['attentions', 'decoder_attentions', 'cross_attentions', 'encoder_attentions']
-                    for attr_name in attention_attrs:
-                        if hasattr(generation_output, attr_name):
-                            attr_value = getattr(generation_output, attr_name)
-                            if attr_value is not None:
-                                attentions = attr_value
-                                logger.info(f"✅ Got attentions from generation.{attr_name}: {len(attentions) if hasattr(attentions, '__len__') else 'unknown length'}")
-                                break
-                    if attentions is None:
-                        logger.warning("No attentions found in generation output")
-                        available_attrs = [attr for attr in dir(generation_output) if not attr.startswith('_')]
-                        logger.info(f"Available generation output attributes: {available_attrs}")
-
-            generation = generation_output.sequences[0][input_len:]
-            raw_response = self.processor.decode(generation, skip_special_tokens=True)
-
-            if attentions is not None:
-                logger.info(f"Attention info - Type: {type(attentions)}, Length: {len(attentions) if hasattr(attentions, '__len__') else 'No len'}")
-                if hasattr(attentions, '__len__') and len(attentions) > 0:
-                    first_attention = attentions[0] if isinstance(attentions, (list, tuple)) else attentions
-                    if hasattr(first_attention, 'shape'):
-                        logger.info(f"First attention shape: {first_attention.shape}")
-            else:
-                logger.warning("⚠️  Still no attentions found - will create placeholder maps")
-
-            # Generate various maps
-            # heatmap_raw_normalized is the key intermediate map (normalized attention)
-            heatmap_image, heatmap_raw_normalized = self._generate_heatmap_and_raw_normalized(attentions, image)
-
-            if heatmap_raw_normalized is None: # Handle case where attention extraction failed
-                logger.warning("heatmap_raw_normalized is None. Generating placeholder for all maps.")
-                # Create a default small gray square as placeholder for heatmap_raw_normalized
-                # The size (e.g., 14x14) should ideally match what would have been the grid_size.
-                # Using a common fallback like 14x14.
-                heatmap_raw_normalized = np.ones((14, 14), dtype=np.float32) * 0.5
-                if heatmap_image is None: # If _generate_heatmap_and_raw_normalized also returned None for image
-                     heatmap_image = self._create_placeholder_heatmap(image)
-
-
-            new_saliency_map_image = self._generate_new_saliency_map(heatmap_raw_normalized, image)
-            probability_map_image = self._generate_probability_map(heatmap_raw_normalized, image)
-            segmentation_map_image = self._generate_segmentation_map(heatmap_raw_normalized, image)
-
+                output = self.model.generate(**inputs, max_new_tokens=256, do_sample=False)
+            raw_response = self.processor.decode(output[0][input_len:], skip_special_tokens=True)
             findings = self.parse_ai_response(raw_response)
-            return raw_response, findings, heatmap_image, new_saliency_map_image, probability_map_image, segmentation_map_image
-
+            # Legacy tuple slots retained for callers; unvalidated maps are not generated.
+            return raw_response, findings, None, None, None, None
         except Exception as e:
-            logger.error(f"Error during image analysis: {str(e)}", exc_info=True)
-            # Return placeholders if analysis fails critically before map generation
-            placeholder_img = self._create_placeholder_heatmap(image)
-            findings = RadiologyFindings(
-                anatomical_structures=["Error during analysis"],
-                abnormalities=[f"Error: {str(e)}"],
-                impression="Analysis Incomplete",
-                recommendations=["Review error logs"],
-                confidence_level="N/A"
-            )
-            # Ensure 6 items are returned by analyze_image in all paths
-            return f"Error: {str(e)}", findings, placeholder_img, placeholder_img, placeholder_img, placeholder_img
-
+            logger.exception("Image analysis failed")
+            raise HTTPException(status_code=500, detail="Image analysis failed") from e
 
     def _generate_heatmap_and_raw_normalized(self, attentions: Optional[tuple], original_image: Image.Image) -> tuple[Image.Image, Optional[np.ndarray]]:
         """
@@ -956,7 +864,7 @@ class MedicalImageAnalyzer:
         5. Response structuring with unique ID
         """
         try:
-            contents = await file.read()
+            contents = await file.read(self.max_image_size + 1)
             
             # Validate file size
             if len(contents) > self.max_image_size:
@@ -966,14 +874,19 @@ class MedicalImageAnalyzer:
                 )
             
             # Process image and convert to RGB
-            image = Image.open(io.BytesIO(contents)).convert('RGB')
+            try:
+                source_image = Image.open(io.BytesIO(contents))
+                image_format = source_image.format
+                image = source_image.convert('RGB')
+            except (OSError, ValueError) as e:
+                raise HTTPException(status_code=400, detail="Invalid image format") from e
             
             # Extract comprehensive metadata
             image_metadata = {
                 "source": "upload",
                 "filename": file.filename,
                 "size": len(contents),
-                "format": image.format,
+                "format": image_format,
                 "mode": image.mode,
                 "dimensions": image.size,
                 "content_type": file.content_type
@@ -1096,6 +1009,8 @@ class MedicalImageAnalyzer:
         - Comprehensive error categorization
         """
         try:
+            if os.getenv("ENABLE_URL_FETCH", "").lower() != "true":
+                raise HTTPException(status_code=403, detail="URL fetching is disabled; use image upload")
             # URL validation and security checks
             if not validators.url(image_url):
                 raise HTTPException(status_code=400, detail="Invalid URL format")
@@ -1173,8 +1088,7 @@ class MedicalImageAnalyzer:
 
 # Initialize analyzer
 analyzer = MedicalImageAnalyzer()
-# Initialize database
-initialize_database()
+# Database setup is managed separately; local usage does not require MySQL.
 
 
 @app.get("/")
@@ -1185,7 +1099,7 @@ async def root():
     Returns:
         dict: API status and basic information
     """
-    return {"message": "Medical Image Analysis API (Med-GEMMA-4) is running", "status": "healthy"}
+    return {"message": "Experimental MedGemma API", "status": "ready" if analyzer and analyzer.model_loaded else "model unavailable"}
 
 
 @app.post("/analyze-and-report", response_model=PDFGenerationResponse)
@@ -1210,18 +1124,18 @@ async def analyze_and_generate_report(
         - Memory-efficient processing
         - Single AI inference run (no duplicate processing)
     """
-    if not file.content_type.startswith('image/'):
+    if not (file.content_type or "").startswith('image/'):
         raise HTTPException(status_code=400, detail="File must be an image")
     
     # Perform analysis once - this includes heatmap generation
-    analysis_response, original_image, heatmap_image = await analyzer.analyze_image_from_upload(file)
+    analysis_response, original_image, heatmap_image, saliency_map, probability_map, segmentation_map = await analyzer.analyze_image_from_upload(file)
     
     # Generate PDF in thread pool to avoid blocking the event loop
     pdf_path = await run_in_threadpool(
-        analyzer.generate_pdf_report, 
+        pdf_generator.generate_pdf_report,
         analysis_response,
         original_image,
-        heatmap_image
+        heatmap_image, saliency_map, probability_map, segmentation_map
     )
     
     return PDFGenerationResponse(
@@ -1262,7 +1176,7 @@ async def list_reports():
 @app.post("/analyze-url", response_model=AnalysisResponse)
 async def analyze_image_url(request: ImageURLRequest):
     """
-    Analyze medical image from HTTP/HTTPS URL using Med-GEMMA-4.
+    Analyze medical image from HTTP/HTTPS URL using MedGemma.
     
     Downloads and analyzes medical images from remote URLs with comprehensive
     security validation and error handling.
@@ -1280,7 +1194,7 @@ async def analyze_image_url(request: ImageURLRequest):
         - Timeout protection
         - Protocol validation (HTTP/HTTPS only)
     """
-    analysis_response, _, _ = await analyzer.analyze_image_from_url(str(request.image_url))
+    analysis_response, *_ = await analyzer.analyze_image_from_url(str(request.image_url))
     return analysis_response
 
 # The working path for the PDF report generation
@@ -1311,7 +1225,7 @@ async def analyze_url_and_generate_report(
     
     # Generate PDF in thread pool to avoid blocking the event loop
     local_pdf_path = await run_in_threadpool(
-        pdf_generator.generate_pdf_report, 
+        pdf_generator.generate_pdf_report,
         analysis_response,
         original_image,
         heatmap_image,
@@ -1338,6 +1252,7 @@ async def analyze_url_and_generate_report(
         logger.info(f"Successfully uploaded PDF to S3: {s3_pdf_url}")
     except Exception as e:
         logger.error(f"Failed to upload PDF to S3: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail="Failed to upload report to S3") from e
 
     path_to_store = s3_key
     
@@ -1355,7 +1270,7 @@ async def analyze_url_and_generate_report(
 @app.get("/model-status", response_model=ModelStatus)
 async def get_model_status():
     """
-    Get current Med-GEMMA-4 model loading status and system information.
+    Get current MedGemma model loading status and system information.
     
     Provides detailed information about model state, device configuration,
     memory usage, and any loading errors for monitoring and debugging.
@@ -1407,7 +1322,7 @@ async def get_model_status():
 @app.post("/load-model")
 async def force_load_model():
     """
-    Force reload the Med-GEMMA-4 pipeline for recovery from loading failures.
+    Force reload the MedGemma pipeline for recovery from loading failures.
     
     Useful for recovering from initial loading failures or reinitializing
     the model after configuration changes.

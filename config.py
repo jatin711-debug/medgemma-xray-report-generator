@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     port: int = 8000
     
     # Model Configuration
-    model_id: str = "google/medgemma-4b-it"
+    model_id: str = "google/medgemma-1.5-4b-it"
     max_tokens: int = 512
     temperature: float = 0.1
     
