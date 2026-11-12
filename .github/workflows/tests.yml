@@ -1,0 +1,49 @@
+name: Tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build container
+        run: docker build -t medgemma-research-test .
+      - name: Import application without loading the model
+        run: docker run --rm medgemma-research-test python -c "import main; print('Application import OK')"
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install locked dependencies
+        run: >-
+          python -m pip install --only-binary=:all: --require-hashes -r requirements.txt
+      - name: Run unit and API tests
+        env:
+          RUN_MODEL_SMOKE: '0'
+          RUN_STORAGE_INTEGRATION: '0'
+        run: python -m unittest discover -s tests -v
+      - name: Validate deployment configuration
+        env:
+          API_KEY_ADMIN: ci-test-key-not-for-deployment-0000000000000
+        run: docker compose config --quiet
+      - name: Start isolated integration services
+        run: docker compose -f compose.integration.yaml up -d
+      - name: Test real MySQL and S3-compatible storage
+        env:
+          RUN_STORAGE_INTEGRATION: '1'
+        run: python -m unittest discover -s tests -p 'test_storage_integration.py' -v
+      - name: Remove integration services
+        if: always()
+        run: docker compose -f compose.integration.yaml down --volumes

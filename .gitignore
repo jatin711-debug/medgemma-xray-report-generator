@@ -125,3 +125,4 @@ coverage/
 *.pdf
 /reports
 *.png
+!requirements.lock

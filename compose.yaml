@@ -1,0 +1,28 @@
+services:
+  api:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      API_KEY_ADMIN: ${API_KEY_ADMIN:?Set API_KEY_ADMIN before starting}
+      API_KEY_OPERATOR: ${API_KEY_OPERATOR:-}
+      API_KEY_READER: ${API_KEY_READER:-}
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
+      MODEL_ID: ${MODEL_ID:-google/medgemma-1.5-4b-it}
+      HF_TOKEN: ${HF_TOKEN:-}
+      MEDGEMMA_QUANTIZE: ${MEDGEMMA_QUANTIZE:-0}
+      ENABLE_URL_FETCH: "false"
+    volumes:
+      - reports:/app/reports
+      - model-cache:/home/app/.cache/huggingface
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+volumes:
+  reports:
+  model-cache:

@@ -1,0 +1,20 @@
+services:
+  mysql:
+    image: mysql:8.4@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+    environment:
+      MYSQL_ROOT_PASSWORD: local-root-password
+      MYSQL_DATABASE: medgemma_integration_test
+      MYSQL_USER: medgemma_test
+      MYSQL_PASSWORD: local-test-password
+    ports:
+      - "127.0.0.1:13306:3306"
+  s3:
+    image: chrislusf/seaweedfs:4.53@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0
+    command: ["server", "-s3", "-s3.port=8333", "-s3.config=/config/s3.json", "-ip=127.0.0.1", "-ip.bind=0.0.0.0", "-dir=/data", "-volume.max=3"]
+    volumes:
+      - ./tests/fixtures/s3.json:/config/s3.json:ro
+      - integration-s3-data:/data
+    ports:
+      - "127.0.0.1:19000:8333"
+volumes:
+  integration-s3-data:
