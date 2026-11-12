@@ -1,18 +1,20 @@
 import os
 import logging
-from datetime import datetime
 from contextlib import asynccontextmanager
 
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
 from dotenv import load_dotenv
 load_dotenv(dotenv_path='.env')
 import torch
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
 from fastapi.concurrency import run_in_threadpool
 from src.api.schemas import (ImageURLRequest, ImageURLReportRequest, RadiologyFindings,
                              AnalysisResponse, PDFGenerationResponse, ModelStatus)
 from src.core.medical_analyzer import MedicalImageAnalyzer
+from src.api.security import configured_keys, reader_access, operator_access, admin_access
+from src.api.limits import RequestSizeLimitMiddleware, inference_slot
 from src.reports.generator import UltimatePDFGenerator
+from src.reports.storage import list_local_reports
 from db import store_analysis_result
 from aws_utils import upload_to_s3
 
@@ -23,6 +25,7 @@ analyzer = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global analyzer
+    configured_keys()  # Fail before loading the model if access control is invalid.
     logger.info("Starting experimental MedGemma API")
     analyzer = MedicalImageAnalyzer()
     await analyzer.load_model()
@@ -31,7 +34,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Medical Image Analysis API (experimental beta)",
               description="Research-only MedGemma chest X-ray prototype",
-              version="1.0.0", lifespan=lifespan)
+              version="1.0.0", lifespan=lifespan,
+              docs_url="/docs" if os.getenv("ENABLE_API_DOCS", "").lower() == "true" else None,
+              redoc_url=None,
+              openapi_url="/openapi.json" if os.getenv("ENABLE_API_DOCS", "").lower() == "true" else None)
+app.add_middleware(RequestSizeLimitMiddleware)
 pdf_generator = UltimatePDFGenerator("reports")
 
 # Initialize analyzer
@@ -39,7 +46,21 @@ analyzer = MedicalImageAnalyzer()
 # Database setup is managed separately; local usage does not require MySQL.
 
 
-@app.get("/")
+@app.get("/health/live", include_in_schema=False)
+async def liveness():
+    """Unauthenticated process liveness probe; does not report model readiness."""
+    return {"status": "alive"}
+
+
+@app.get("/health/ready", dependencies=[reader_access])
+async def readiness():
+    """Report model readiness; storage integrations are not checked."""
+    if not analyzer or not analyzer.model_loaded:
+        raise HTTPException(status_code=503, detail="Model is not ready")
+    return {"status": "ready"}
+
+
+@app.get("/", dependencies=[reader_access])
 async def root():
     """
     Health check endpoint for API status verification.
@@ -50,15 +71,14 @@ async def root():
     return {"message": "Experimental MedGemma API", "status": "ready" if analyzer and analyzer.model_loaded else "model unavailable"}
 
 
-@app.post("/analyze-and-report", response_model=PDFGenerationResponse)
+@app.post("/analyze-and-report", response_model=PDFGenerationResponse, dependencies=[operator_access, Depends(inference_slot)])
 async def analyze_and_generate_report(
     file: UploadFile = File(...)
 ):
     """
     Analyze medical image and generate comprehensive PDF report.
     
-    Combines image analysis with professional PDF report generation
-    optimized for medical documentation and record keeping.
+    Runs one research analysis and writes its PDF report locally.
     
     Args:
         file: Uploaded medical image file
@@ -90,7 +110,7 @@ async def analyze_and_generate_report(
         analysis_id=analysis_response.analysis_id
     )
 
-@app.get("/reports")
+@app.get("/reports", dependencies=[reader_access])
 async def list_reports():
     """
     List all generated medical reports with metadata.
@@ -102,31 +122,19 @@ async def list_reports():
         HTTPException: If listing operation fails
     """
     try:
-        reports = []
-        if os.path.exists(analyzer.reports_dir):
-            for filename in os.listdir(analyzer.reports_dir):
-                if filename.endswith('.pdf'):
-                    filepath = os.path.join(analyzer.reports_dir, filename)
-                    stats = os.stat(filepath)
-                    reports.append({
-                        "filename": filename,
-                        "analysis_id": filename.replace("medical_report_", "").replace(".pdf", ""),
-                        "created_at": datetime.fromtimestamp(stats.st_ctime).isoformat(),
-                        "size": stats.st_size
-                    })
+        reports = await run_in_threadpool(list_local_reports, pdf_generator.reports_dir)
         return {"reports": reports}
     except Exception as e:
         logger.error(f"Error listing reports: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to list reports")
 
 
-@app.post("/analyze-url", response_model=AnalysisResponse)
+@app.post("/analyze-url", response_model=AnalysisResponse, dependencies=[operator_access, Depends(inference_slot)])
 async def analyze_image_url(request: ImageURLRequest):
     """
     Analyze medical image from HTTP/HTTPS URL using MedGemma.
     
-    Downloads and analyzes medical images from remote URLs with comprehensive
-    security validation and error handling.
+    Analyze an image from an enabled public URL.
     
     Args:
         request: ImageURLRequest containing the image URL
@@ -145,15 +153,15 @@ async def analyze_image_url(request: ImageURLRequest):
     return analysis_response
 
 # The working path for the PDF report generation
-@app.post("/analyze-url-and-report", response_model=PDFGenerationResponse)
+@app.post("/analyze-url-and-report", response_model=PDFGenerationResponse, dependencies=[operator_access, Depends(inference_slot)])
 async def analyze_url_and_generate_report(
     request: ImageURLReportRequest
 ):
     """
     Analyze medical image from URL and generate comprehensive PDF report.
     
-    Combines secure image downloading, AI analysis, professional PDF
-    report generation, S3 upload, and database logging.
+    Combines image downloading, AI analysis, PDF generation, S3 upload,
+    and database logging for the optional integration.
     
     Args:
         request: ImageURLReportRequest containing the image URL
@@ -167,6 +175,11 @@ async def analyze_url_and_generate_report(
         - Memory-conscious processing pipeline
         - Single AI inference run (no duplicate processing)
     """
+    s3_bucket_name = os.getenv("AWS_S3_BUCKET_NAME")
+    s3_region = os.getenv("AWS_REGION")
+    if not s3_bucket_name or not s3_region:
+        raise HTTPException(status_code=503, detail="S3 storage is not configured")
+
     # Perform analysis once
     analysis_response, original_image = await analyzer.analyze_image_from_url(str(request.image_url))
     
@@ -177,22 +190,18 @@ async def analyze_url_and_generate_report(
         original_image
     )
     
-    # Define S3 bucket details (replace with your actual configuration)
-    s3_bucket_name = os.getenv("AWS_S3_BUCKET_NAME", "your-s3-bucket-name")
-    s3_region = os.getenv("AWS_REGION", "your-aws-region")
     # Create a unique S3 key, e.g., using the analysis ID
     s3_key = f"reports/{analysis_response.analysis_id}/{os.path.basename(local_pdf_path)}"
     
-    s3_pdf_url = ""  # Initialize to empty string
     try:
         # Upload the PDF to S3
-        s3_pdf_url = await upload_to_s3(
+        await upload_to_s3(
             local_file_path=local_pdf_path,
             bucket_name=s3_bucket_name,
             s3_key=s3_key,
             region_name=s3_region
         )
-        logger.info(f"Successfully uploaded PDF to S3: {s3_pdf_url}")
+        logger.info("Successfully uploaded PDF to S3")
     except Exception as e:
         logger.error(f"Failed to upload PDF to S3: {e}", exc_info=True)
         raise HTTPException(status_code=502, detail="Failed to upload report to S3") from e
@@ -210,7 +219,7 @@ async def analyze_url_and_generate_report(
     )
 
 
-@app.get("/model-status", response_model=ModelStatus)
+@app.get("/model-status", response_model=ModelStatus, dependencies=[reader_access])
 async def get_model_status():
     """
     Get current MedGemma model loading status and system information.
@@ -243,7 +252,7 @@ async def get_model_status():
                 loaded=False,
                 device="unknown",
                 memory_usage=analyzer.get_system_memory_info(),
-                error=analyzer.model_loading_error
+                error="Model loading failed; check server logs"
             )
         else:
             return ModelStatus(
@@ -257,11 +266,11 @@ async def get_model_status():
             loaded=False,
             device="unknown",
             memory_usage="unavailable",
-            error=str(e)
+            error="Model status unavailable"
         )
 
 
-@app.post("/load-model")
+@app.post("/load-model", dependencies=[admin_access, Depends(inference_slot)])
 async def force_load_model():
     """
     Force reload the MedGemma pipeline for recovery from loading failures.
@@ -272,23 +281,11 @@ async def force_load_model():
     Returns:
         dict: Loading status and result message
         
-    Recovery Features:
-        - Clears previous error states
-        - Reinitializes model pipeline
-        - Comprehensive error reporting
-        - Memory cleanup and optimization
+    Reload waits for any in-progress inference to finish.
     """
-    analyzer.model_loading_error = None
-    
-    # Reset pipeline for clean reload
-    analyzer.model = None
-    analyzer.processor = None
-    analyzer.model_loaded = False
-    
     try:
-        await analyzer.load_model()
-        return {"message": "Model loading initiated", "status": "success"}
-    except Exception as e:
-        return {"message": f"Model loading failed: {str(e)}", "status": "error"}
-
-
+        await analyzer.reload_model()
+        return {"message": "Model loaded", "status": "success"}
+    except Exception:
+        logger.exception("Model reload failed")
+        raise HTTPException(status_code=503, detail="Model reload failed")

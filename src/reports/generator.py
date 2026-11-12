@@ -15,6 +15,7 @@ from reportlab.platypus import (
 )
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from src.reports.storage import atomic_report, report_path
 
 # Setup basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -425,7 +426,7 @@ class UltimatePDFGenerator:
         
         canvas.setFont(self.font_body, 10)
         canvas.setFillColor(self.colors['gray_600'])
-        canvas.drawString(logo_x + 60, logo_y + 8, "Advanced Neural Network Analysis • Clinical Decision Support")
+        canvas.drawString(logo_x + 60, logo_y + 8, "Experimental model output • Research use only")
         
         # Header decoration
         canvas.setStrokeColor(self.colors['accent_cyan'])
@@ -464,7 +465,7 @@ class UltimatePDFGenerator:
         # Security indicator
         canvas.setFont(self.font_body, 8)
         canvas.setFillColor(self.colors['gray_400'])
-        canvas.drawRightString(page_width - 40, footer_y + 2, "🔒 Encrypted • HIPAA Compliant")
+        canvas.drawRightString(page_width - 40, footer_y + 2, "Not validated for patient care")
         
         canvas.restoreState()
 
@@ -502,7 +503,7 @@ class UltimatePDFGenerator:
         
         card_content = [
             [Paragraph(f"{icon}", ParagraphStyle('Icon', fontSize=16, alignment=TA_CENTER, spaceAfter=6))],
-            [Paragraph(str(value).replace('\n', ' ').strip(), value_style)],
+            [Paragraph(escape(str(value).replace('\n', ' ').strip()), value_style)],
             [Paragraph(label, label_style)]
         ]
         
@@ -550,7 +551,7 @@ class UltimatePDFGenerator:
             row = [
                 Paragraph(icon, ParagraphStyle('Icon', fontSize=12, alignment=TA_CENTER)),
                 Paragraph(label, self.styles['meta_label']),
-                Paragraph(str(value), self.styles['meta_value'])
+                Paragraph(escape(str(value)), self.styles['meta_value'])
             ]
             styled_rows.append(row)
         
@@ -603,11 +604,16 @@ class UltimatePDFGenerator:
     def generate_pdf_report(self,
                             analysis_response,
                             original_image: Image.Image) -> str:
-        """Generate an experimental research PDF report."""
-        
-        filename = f"premium_medical_report_{analysis_response.analysis_id}.pdf"
-        filepath = os.path.join(self.reports_dir, filename)
-        
+        """Build a research PDF and publish it only after rendering succeeds."""
+        destination = report_path(self.reports_dir, analysis_response.analysis_id)
+        with atomic_report(destination) as temporary:
+            self._build_pdf_report(analysis_response, original_image, temporary)
+        logger.info("Successfully generated experimental PDF report")
+        return str(destination)
+
+    def _build_pdf_report(self, analysis_response, original_image: Image.Image,
+                          filepath: str) -> None:
+        """Render the document to a private temporary path before publication."""
         doc = SimpleDocTemplate(
             filepath,
             pagesize=letter,
@@ -703,14 +709,14 @@ class UltimatePDFGenerator:
         detailed_findings_data = [
             [Paragraph("<b>Medical Finding</b>", self.styles['table_header']), 
              Paragraph("<b>Detection Status</b>", self.styles['table_header']), 
-             Paragraph("<b>AI-Generated Clinical Details</b>", self.styles['table_header'])]
+             Paragraph("<b>Model Output Details</b>", self.styles['table_header'])]
         ]
         
         finding_name = findings.impression
-        status_p = Paragraph(findings.impression.upper(), self.styles['finding_status'])
-        details_text = "<br/>".join(findings.abnormalities)
+        status_p = Paragraph(escape(findings.impression.upper()), self.styles['finding_status'])
+        details_text = "<br/>".join(escape(item) for item in findings.abnormalities)
 
-        finding_p = Paragraph(finding_name, self.styles['body'])
+        finding_p = Paragraph(escape(finding_name), self.styles['body'])
         details_p = Paragraph(details_text, self.styles['body'])
         detailed_findings_data.append([finding_p, status_p, details_p])
 
@@ -735,7 +741,7 @@ class UltimatePDFGenerator:
         # Create a more compact recommendations section
         recommendations_data = [
             [Paragraph("<b>📋 Professional Review Required:</b> This prototype has not been validated for clinical decisions or patient care.", self.styles['body'])],
-            [Paragraph("<b>⚕️ Clinical Correlation Essential:</b> The model may produce incorrect or indeterminate findings.", self.styles['body'])],
+            [Paragraph("<b>Model Limitations:</b> The model may produce incorrect or indeterminate findings.", self.styles['body'])],
             [Paragraph("<b>Confidence:</b> No calibrated confidence score is available.", self.styles['body'])]
         ]
         
@@ -752,9 +758,6 @@ class UltimatePDFGenerator:
 
         doc.build(story, onFirstPage=self._draw_page_template, onLaterPages=self._draw_page_template)
         
-        logger.info(f"Successfully generated premium PDF report at: {filepath}")
-        return filepath
-
     def _draw_page_template(self, canvas, doc):
         """Helper method to draw the header and footer on each page."""
         self._create_header_canvas(canvas, doc)

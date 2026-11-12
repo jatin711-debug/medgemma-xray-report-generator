@@ -1,87 +1,64 @@
-from fastapi import HTTPException # Changed from http.client
-import mysql.connector
-from dotenv import load_dotenv
+"""MySQL storage helpers for the optional S3 reporting workflow."""
+import logging
 import os
-load_dotenv(dotenv_path=".env")
+
+import mysql.connector
+from fastapi import HTTPException
+from fastapi.concurrency import run_in_threadpool
+
+logger = logging.getLogger(__name__)
+
+
+def _connect():
+    return mysql.connector.connect(
+        host=os.getenv("MYSQL_HOST"), user=os.getenv("MYSQL_USER"),
+        password=os.getenv("MYSQL_PASSWORD"), database=os.getenv("MYSQL_DATABASE"),
+        port=int(os.getenv("MYSQL_PORT", "3306")), connection_timeout=10,
+    )
+
+
+def _store_analysis_result(image_uuid: str, report_path: str) -> None:
+    connection = None
+    cursor = None
+    try:
+        connection = _connect()
+        cursor = connection.cursor()
+        cursor.execute("INSERT INTO xray_reports (image_uuid, report_path) VALUES (%s, %s)",
+                       (image_uuid, report_path))
+        connection.commit()
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if connection is not None:
+            connection.close()
+
 
 async def store_analysis_result(image_uuid: str, reportPath: str) -> None:
-    """
-    Store the analysis result in the MySQL database.
-
-    Args:
-        image_uuid: Unique identifier for the image.
-        reportPath: Path to the generated PDF report.
-    """
+    """Store a report key without blocking the server's event loop."""
     try:
-        # Connect to the MySQL database
-        connection = mysql.connector.connect(
-            host=os.getenv('MYSQL_HOST'),
-            user=os.getenv('MYSQL_USER'),
-            password=os.getenv('MYSQL_PASSWORD'),
-            database=os.getenv('MYSQL_DATABASE'),
-            port=int(os.getenv('MYSQL_PORT', 3306))  # Default MySQL port, change if necessary
-        )
-        cursor = connection.cursor()
+        await run_in_threadpool(_store_analysis_result, image_uuid, reportPath)
+    except (mysql.connector.Error, ValueError) as exc:
+        logger.exception("Failed to store report metadata")
+        raise HTTPException(status_code=500, detail="Failed to store report metadata") from exc
 
-        # Insert the data into the table
-        query = "INSERT INTO xray_reports (image_uuid, report_path) VALUES (%s, %s)"
-        cursor.execute(query, (image_uuid, reportPath))
-        # Commit the transaction
-        connection.commit()
-        cursor.close()
-        connection.close()
-    except mysql.connector.Error as err:
-        print(f"MySQL Error: {err}")
-        # Use FastAPI's HTTPException
-        raise HTTPException(status_code=500, detail=f"Failed to store analysis result: {err}")
-    except Exception as e:
-        print(f"General Error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to store analysis result: {e}")
-    
+
 def initialize_database() -> None:
-    """
-    Initialize the database by creating the necessary table if it does not exist.
-    """
+    """Create the report table if it is missing; run explicitly during setup."""
+    connection = None
+    cursor = None
     try:
-        # Connect to the MySQL database
-        connection = mysql.connector.connect(
-            host=os.getenv('MYSQL_HOST'),
-            user=os.getenv('MYSQL_USER'),
-            password=os.getenv('MYSQL_PASSWORD'),
-            database=os.getenv('MYSQL_DATABASE'),
-            port=int(os.getenv('MYSQL_PORT', 3306))  # Default MySQL port, change if necessary
-        )
+        connection = _connect()
         cursor = connection.cursor()
-
-        # Create the table if it does not exist
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS xray_reports (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                image_uuid VARCHAR(255) NOT NULL UNIQUE ,
-                report_path VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- Timestamp of when the user was created
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP -- Timestamp of the last update
-            );
-        """)
-        # Create the index separately and handle if it already exists
-        try:
-            cursor.execute("""
-                CREATE INDEX idx_image_uuid ON xray_reports (image_uuid);
-            """)
-        except mysql.connector.Error as err:
-            if err.errno == 1061:  # ER_DUP_KEYNAME (Duplicate key name)
-                print(f"Info: Index 'idx_image_uuid' already exists on table 'xray_reports'.")
-            else:
-                raise # Re-raise other MySQL errors
-        
-        # It's good practice to close the cursor before committing if no more operations are needed with it.
-        cursor.close()
+        cursor.execute("""CREATE TABLE IF NOT EXISTS xray_reports (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            image_uuid VARCHAR(255) NOT NULL UNIQUE,
+            report_path VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        )""")
         connection.commit()
-        connection.close()
-    except mysql.connector.Error as err:
-        print(f"MySQL Error during database initialization: {err}")
-        # Use FastAPI's HTTPException
-        raise HTTPException(status_code=500, detail=f"Failed to initialize database: {err}")
-    except Exception as e:
-        print(f"General Error during database initialization: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to initialize database: {e}")
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if connection is not None:
+            connection.close()

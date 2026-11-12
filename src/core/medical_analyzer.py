@@ -1,18 +1,18 @@
 import os
+import asyncio
 import uuid
-import re
-import io
 import gc
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
-import aiohttp
-import validators
 from fastapi import UploadFile, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from PIL import Image
 import torch
 from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
 from src.api.schemas import AnalysisResponse, RadiologyFindings
+from src.services.image_input import fetch_image, read_upload
+from src.core.findings import parse_ai_response
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ class MedicalImageAnalyzer:
         self.allowed_extensions = {'.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.webp'}
         self.model_loaded = False
         self.model_loading_error: Optional[str] = None
+        self._model_lock = asyncio.Lock()
         self.ensure_reports_directory()
         
     def ensure_reports_directory(self) -> None:
@@ -86,6 +87,20 @@ class MedicalImageAnalyzer:
             return f"Memory info unavailable: {str(e)}"
     
     async def load_model(self) -> None:
+        """Load the shared model without blocking the event loop."""
+        async with self._model_lock:
+            await run_in_threadpool(self._load_model)
+
+    async def reload_model(self) -> None:
+        """Reload only after any active inference has completed."""
+        async with self._model_lock:
+            self.model = None
+            self.processor = None
+            self.model_loaded = False
+            self.model_loading_error = None
+            await run_in_threadpool(self._load_model)
+
+    def _load_model(self) -> None:
         """
         Load the MedGemma model and processor with memory optimization.
         
@@ -109,11 +124,10 @@ class MedicalImageAnalyzer:
 
         # Preserve automatic 4-bit CUDA loading by default; allow full precision.
         quantization_mode = os.getenv("MEDGEMMA_QUANTIZE", "auto").lower()
-        if quantization_mode not in {"auto", "1", "0"}:
-            raise ValueError("MEDGEMMA_QUANTIZE must be auto, 1, or 0")
-        use_quantization = torch.cuda.is_available() and quantization_mode != "0"
-
         try:
+            if quantization_mode not in {"auto", "1", "0"}:
+                raise ValueError("MEDGEMMA_QUANTIZE must be auto, 1, or 0")
+            use_quantization = torch.cuda.is_available() and quantization_mode != "0"
             quantization_config = None
             if use_quantization:
                 quantization_config = BitsAndBytesConfig(
@@ -148,43 +162,21 @@ class MedicalImageAnalyzer:
             raise RuntimeError(self.model_loading_error) from e
     
     def parse_ai_response(self, raw_response: str) -> RadiologyFindings:
-        """
-        Parse raw AI model output for pneumothorax detection.
-        
-        This method intelligently extracts the finding and confidence level for pneumothorax.
-        
-        Args:
-            raw_response: Raw text output from the MedGemma model
-              Returns:
-            RadiologyFindings: Structured medical findings for pneumothorax.
-        """
-        # Accept only the exact requested finding line; everything else is uncertain.
-        match = re.search(r"(?im)^\s*\*\*Finding\*\*\s*:\s*(.*?)\s*$", raw_response)
-        value = match.group(1).strip().strip("* ").lower().rstrip(".") if match else ""
-        if value == "no pneumothorax detected":
-            impression = "No Pneumothorax Detected"
-            abnormalities = ["Model output: no pneumothorax detected."]
-        elif value == "pneumothorax detected":
-            impression = "Pneumothorax Detected"
-            abnormalities = ["Model output: pneumothorax detected."]
-        else:
-            impression = "Indeterminate"
-            abnormalities = ["The model response could not be classified reliably."]
-        return RadiologyFindings(
-            anatomical_structures=["Chest X-ray"], abnormalities=abnormalities,
-            impression=impression, recommendations=["Research use only; expert review required."],
-            confidence_level="Not available (uncalibrated)",
-        )
+        """Delegate parsing to the standalone, model-independent parser."""
+        return parse_ai_response(raw_response)
 
     async def analyze_image(self, image: Image.Image) -> tuple[str, RadiologyFindings]:
         """
         Perform AI-powered medical image analysis using Med-GEMMA.
         Returns the raw text response and structured findings.
         """
-        await self.load_model()
+        async with self._model_lock:
+            await run_in_threadpool(self._load_model)
+            return await run_in_threadpool(self._analyze_image, image)
 
+    def _analyze_image(self, image: Image.Image) -> tuple[str, RadiologyFindings]:
+        """Run synchronous inference while the caller holds the model lock."""
         try:
-            # Resize image to match model input expectations (usually 224x224)
             image_for_model = image
 
             messages = [
@@ -228,243 +220,27 @@ class MedicalImageAnalyzer:
             logger.exception("Image analysis failed")
             raise HTTPException(status_code=500, detail="Image analysis failed") from e
 
+    def _make_response(self, raw_response: str, findings: RadiologyFindings, metadata: dict) -> AnalysisResponse:
+        """Build a response using a UTC timestamp and a generated identifier."""
+        return AnalysisResponse(
+            analysis_id=str(uuid.uuid4()), timestamp=datetime.now(timezone.utc).isoformat(),
+            findings=findings, raw_response=raw_response, image_metadata=metadata,
+        )
+
     async def analyze_image_from_upload(self, file: UploadFile) -> tuple[AnalysisResponse, Image.Image]:
-        """
-        Analyze medical image from uploaded file and return complete analysis response with images.
-        
-        Processes uploaded image files through the complete analysis pipeline,
-        including validation, preprocessing, AI analysis, and metadata collection.
-        
-        Args:
-            file: FastAPI UploadFile containing the medical image
-            
-        Returns:
-            tuple: (AnalysisResponse, original_image)
-            
-        Raises:
-            HTTPException: If file processing or analysis fails
-            
-        Process:
-        1. File validation and size checking
-        2. Image preprocessing and format conversion
-        3. Metadata extraction
-        4. AI-powered analysis
-        5. Response structuring with unique ID
-        """
-        try:
-            contents = await file.read(self.max_image_size + 1)
-            
-            # Validate file size
-            if len(contents) > self.max_image_size:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Image too large. Maximum size: {self.max_image_size/1024/1024:.1f}MB"
-                )
-            
-            # Process image and convert to RGB
-            try:
-                source_image = Image.open(io.BytesIO(contents))
-                image_format = source_image.format
-                image = source_image.convert('RGB')
-            except (OSError, ValueError) as e:
-                raise HTTPException(status_code=400, detail="Invalid image format") from e
-            
-            # Extract comprehensive metadata
-            image_metadata = {
-                "source": "upload",
-                "filename": file.filename,
-                "size": len(contents),
-                "format": image_format,
-                "mode": image.mode,
-                "dimensions": image.size,
-                "content_type": file.content_type
-            }
-            
-            # Perform AI analysis
-            raw_response, findings = await self.analyze_image(image)
-            
-            # Generate unique analysis ID and timestamp
-            analysis_id = str(uuid.uuid4())
-            timestamp = datetime.now().isoformat()
-            
-            analysis_response = AnalysisResponse(
-                analysis_id=analysis_id,
-                timestamp=timestamp,
-                findings=findings,
-                raw_response=raw_response,
-                image_metadata=image_metadata
-            )
-            
-            return analysis_response, image
-            
-        except Exception as e:
-            logger.error(f"Error analyzing uploaded image: {str(e)}")
-            if isinstance(e, HTTPException):            raise
-            raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+        """Validate an uploaded image and run one model analysis."""
+        image, metadata = await read_upload(file, self.max_image_size)
+        raw_response, findings = await self.analyze_image(image)
+        return self._make_response(raw_response, findings, metadata), image
 
     async def analyze_image_from_url(self, image_url: str) -> tuple[AnalysisResponse, Image.Image]:
-        """
-        Analyze medical image from URL and return complete analysis response with images.
-        
-        Downloads and analyzes medical images from HTTP/HTTPS URLs with
-        validation and metadata collection.
-        
-        Args:
-            image_url: Valid HTTP/HTTPS URL pointing to a medical image
-
-        Returns:
-            tuple: (AnalysisResponse, original_image)
-            
-        Raises:
-            HTTPException: If URL fetch or analysis fails
-            
-        Security Features:
-        - URL validation and format checking
-        - Protocol restriction (HTTP/HTTPS only)
-        - Content-Type verification
-        - File size limitations
-        - Timeout protection
-        - Comprehensive error handling
-        """
-        try:
-            # Fetch image with security validation
-            image, image_metadata = await self.fetch_image_from_url(image_url)
-            
-            # Perform AI analysis
-            raw_response, findings = await self.analyze_image(image)
-            
-            # Generate unique analysis ID and timestamp
-            analysis_id = str(uuid.uuid4())
-            timestamp = datetime.now().isoformat()
-            
-            # Update metadata with URL source info
-            image_metadata.update({
-                "source": "url",
-                "url": image_url
-            })
-            
-            analysis_response = AnalysisResponse(
-                analysis_id=analysis_id,
-                timestamp=timestamp,
-                findings=findings,
-                raw_response=raw_response,
-                image_metadata=image_metadata
-            )
-            
-            return analysis_response, image
-            
-        except Exception as e:
-            logger.error(f"Error analyzing image from URL: {str(e)}")
-            if isinstance(e, HTTPException):
-                raise e
-            raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+        """Fetch an enabled public image URL and run one model analysis."""
+        image, metadata = await self.fetch_image_from_url(image_url)
+        raw_response, findings = await self.analyze_image(image)
+        return self._make_response(raw_response, findings, metadata), image
 
     async def fetch_image_from_url(self, image_url: str) -> tuple[Image.Image, Dict[str, Any]]:
-        """
-        Securely fetch medical image from HTTP/HTTPS URL with comprehensive validation.
-        
-        Downloads images from URLs with robust security measures, format validation,
-        and metadata extraction suitable for medical image processing.
-        
-        Args:
-            image_url: HTTP/HTTPS URL pointing to an image resource
-            
-        Returns:
-            tuple: (PIL_Image, metadata_dict)
-            - PIL_Image: Processed image in RGB format
-            - metadata_dict: Comprehensive image and download metadata
-            
-        Raises:
-            HTTPException: For various failure scenarios with specific error codes
-            
-        Security Measures:
-        - URL format validation
-        - Protocol restriction (HTTP/HTTPS only)
-        - Content-Type verification
-        - File size limitations (pre and post download)
-        - Timeout protection (30 seconds)
-        - Proper User-Agent identification
-        
-        Performance Optimizations:
-        - Efficient async HTTP handling
-        - Memory-conscious image processing
-        - Comprehensive error categorization
-        """
-        try:
-            if os.getenv("ENABLE_URL_FETCH", "").lower() != "true":
-                raise HTTPException(status_code=403, detail="URL fetching is disabled; use image upload")
-            # URL validation and security checks
-            if not validators.url(image_url):
-                raise HTTPException(status_code=400, detail="Invalid URL format")
-            if not image_url.startswith(('https://', 'http://')):
-                raise HTTPException(status_code=400, detail="Only HTTP/HTTPS URLs are supported")
-            
-            # Configure secure HTTP client
-            headers = {
-                'User-Agent': 'Medical-Image-Analysis-API/1.0.0',
-                'Accept': 'image/*'
-            }
-            timeout = aiohttp.ClientTimeout(total=30)
-            
-            # Secure image download with validation
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(image_url, headers=headers) as response:
-                    if response.status != 200:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Failed to fetch image. HTTP {response.status}: {response.reason}"
-                        )
-                    
-                    # Content validation
-                    content_type = response.headers.get('content-type', '').lower()
-                    if not content_type.startswith('image/'):
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"URL does not point to an image. Content-Type: {content_type}"
-                        )
-                    
-                    # Size validation (pre-download)
-                    content_length = response.headers.get('content-length')
-                    if content_length and int(content_length) > self.max_image_size:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Image too large. Maximum size: {self.max_image_size/1024/1024:.1f}MB"
-                        )
-                    
-                    # Download and validate actual size
-                    image_data = await response.read()
-                    if len(image_data) > self.max_image_size:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Image too large. Maximum size: {self.max_image_size/1024/1024:.1f}MB"
-                        )
-            
-            # Image processing and validation
-            try:
-                image = Image.open(io.BytesIO(image_data)).convert('RGB')
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Invalid image format: {str(e)}")
-            
-            # Comprehensive metadata collection
-            image_metadata = {
-                "source": "url",
-                "url": image_url,
-                "size": len(image_data),
-                "format": image.format,
-                "mode": image.mode,
-                "dimensions": image.size,
-                "content_type": content_type
-            }
-            
-            logger.info(f"Successfully fetched image from URL: {image_url}")
-            return image, image_metadata
-            
-        except aiohttp.ClientError as e:
-            logger.error(f"Network error fetching image from {image_url}: {str(e)}")
-            raise HTTPException(status_code=400, detail=f"Network error: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error fetching image from {image_url}: {str(e)}")
-            if isinstance(e, HTTPException):
-                raise
-            raise HTTPException(status_code=500, detail=f"Failed to fetch image: {str(e)}")
-
+        """Fetch an image only when the optional URL workflow is enabled."""
+        if os.getenv("ENABLE_URL_FETCH", "").lower() != "true":
+            raise HTTPException(status_code=403, detail="URL fetching is disabled; use image upload")
+        return await fetch_image(image_url, self.max_image_size)
