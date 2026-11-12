@@ -26,8 +26,8 @@ class ImageURLReportRequest(BaseModel):
     """
     image_url: HttpUrl = Field(description="HTTP/HTTPS URL of the image to analyze and generate report")
     image_uuid: str = Field(
-        description="Unique identifier for the X-ray image",
-        example="123e4567-e89b-12d3-a456-426614174000"
+        description="Identifier for the X-ray image", min_length=1, max_length=255,
+        examples=["123e4567-e89b-12d3-a456-426614174000"]
     )
     
     model_config = {
