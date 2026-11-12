@@ -1,43 +1,131 @@
-# MedGemma Chest X-ray Report Generator — Experimental Beta
+# MedGemma Chest X-ray Report Generator
 
-> **Research and educational prototype only.** This project is experimental, unvalidated, and not intended for diagnosis, clinical decisions, patient care, or production use. Model outputs can be wrong or indeterminate. Do not upload real patient data without appropriate authorization and safeguards.
+[![Tests](https://github.com/jatin711-debug/medgemma-xray-report-generator/actions/workflows/tests.yml/badge.svg)](https://github.com/jatin711-debug/medgemma-xray-report-generator/actions/workflows/tests.yml)
+![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+![Status: experimental](https://img.shields.io/badge/status-experimental-orange)
 
-A FastAPI prototype that sends a single chest X-ray image to MedGemma and produces a PDF containing the model's pneumothorax assessment. It is a software experiment, not a validated medical device. The default model is [MedGemma 1.5 4B](https://huggingface.co/google/medgemma-1.5-4b-it); see the [technical report](https://arxiv.org/html/2604.05081v2). The model's wider capabilities are not implemented by this application.
+A FastAPI service that sends a chest X-ray image to [MedGemma 1.5 4B](https://huggingface.co/google/medgemma-1.5-4b-it) and renders the model's pneumothorax assessment as a PDF report.
 
-The response parser accepts only the requested exact finding format; other responses are marked indeterminate. Confidence scores are not calibrated. Earlier experimental attention-derived visualizations are omitted from reports because they are not validated probability or segmentation maps.
+> [!WARNING]
+> **Research and educational prototype only.** This project is unvalidated and is not a medical device. Do not use it for diagnosis, clinical decisions, or patient care. Model outputs can be wrong or indeterminate, and confidence scores are not calibrated. Use synthetic or appropriately authorized, non-sensitive images only.
 
-## Setup
+## Features
 
-1. Use a recent Python version (Python 3.10 or newer), install dependencies with `pip install -r requirements.txt`, and configure PyTorch for your hardware. A capable GPU is recommended; CPU inference may be slow and memory intensive.
-2. Request/accept access to the model and its license on the [model page](https://huggingface.co/google/medgemma-1.5-4b-it), then authenticate with Hugging Face (for example, `hf auth login`). Model download requires network access and substantial storage.
-3. Optionally copy `samplenv` to `.env`. `MODEL_ID` selects the model; most other sample settings are not currently wired into the application. The local upload workflow does not require S3 or MySQL.
-4. Run `uvicorn main:app --host 127.0.0.1 --port 8000` (or `python app.py`) and open `http://127.0.0.1:8000/docs`. Startup loads the model and can take time.
+- **Single-image analysis** of JPEG, PNG, TIFF, BMP or WebP chest X-rays (DICOM is not supported).
+- **Strict output parsing:** responses that don't match the requested finding format are marked *indeterminate* rather than guessed.
+- **PDF reports** that are written to a temporary file and published atomically, so a failed build never leaves a partial report.
+- **Role-based API keys** (reader / operator / admin) that fail closed when configuration is missing or weak.
+- **Input safeguards:** 10 MiB / 25-megapixel image limits, a request-body cap, and one inference at a time per process.
+- **Optional URL workflow** with SSRF protection, plus S3 upload and MySQL logging (disabled by default).
+- **Reproducible setup:** hash-locked dependencies, a non-root read-only container, and CI.
 
-The launcher accepts `--host`, `--port`, `--reload`, `--quantize`, and `--no-quantize`. The default is 4-bit quantization on CUDA and full precision on CPU; use `MEDGEMMA_QUANTIZE=0` or `--no-quantize` for full precision on CUDA. Model loading still depends on your hardware and installed libraries.
+## Quick start
 
-## API
+**Requirements:** Python 3.12, a Hugging Face account with access to the gated MedGemma model, and ideally a CUDA GPU (CPU inference works but is slow and memory-hungry).
 
-- `POST /analyze-and-report`: multipart `file` image upload; creates a local PDF under `reports/` and returns its path and analysis ID.
-- `GET /reports`: lists locally generated PDFs.
-- `GET /model-status` and `POST /load-model`: inspect or reload the model.
-- `POST /analyze-url` and `POST /analyze-url-and-report`: URL workflows. Disabled by default; `ENABLE_URL_FETCH=true` enables them. URL fetching is not protected against access to private/internal addresses, so enable it only in a trusted, isolated environment. The report URL workflow also requires configured AWS S3 and MySQL services and an existing `xray_reports` table; see `db.py` for its schema.
+```shell
+# 1. Install locked dependencies
+python -m pip install --only-binary=:all: --require-hashes -r requirements.txt
 
-Example (PowerShell):
+# 2. Accept the model terms on Hugging Face, then authenticate
+hf auth login
 
-```powershell
-curl.exe -X POST http://127.0.0.1:8000/analyze-and-report -F "file=@path/to/chest-xray.png"
+# 3. Configure: copy the sample env file and set API_KEY_ADMIN
+cp samplenv .env
+python -c "import secrets; print(secrets.token_urlsafe(32))"   # use the output as API_KEY_ADMIN
+
+# 4. Run (startup downloads and loads the model, which takes a while)
+python app.py            # or: uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-The PDF path refers to the server filesystem; this prototype does not provide a report download endpoint. API endpoints do not implement authentication, access control, or rate limiting. Keep the server local and use non-sensitive sample data. The model, prompt, parser, output and full application have not been clinically evaluated. Results should not be interpreted as medical advice.
+`app.py` accepts `--host`, `--port`, `--reload`, `--quantize` and `--no-quantize`.
 
-## Limitations and contributing
+Or with Docker, after setting `API_KEY_ADMIN` and `HF_TOKEN`:
 
-The application accepts ordinary image formats, not DICOM studies. Model access, library versions, hardware and GPU quantization can affect whether inference works. The URL-to-S3/MySQL integration is experimental and needs external services. There is no production deployment configuration or validated test dataset in this repository. Contributions and independent evaluation are welcome.
+```shell
+docker compose up --build
+```
 
-The model is distributed under its own license and access terms; this repository does not currently specify a code license.
+## Usage
 
-## Code structure
+Every route except `/health/live` requires an `X-API-Key` header.
 
-`src/api/` contains the API and request/response schemas, `src/core/` contains the MedGemma analyzer, and `src/reports/` contains PDF generation. `main.py` remains the compatible server entry point. The multi-condition and Grad-CAM experiments are not part of the current workflow.
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/analyze-and-report `
+  -H "X-API-Key: $env:MEDGEMMA_API_KEY" `
+  -F "file=@path/to/chest-xray.png"
+```
 
-Run the lightweight API and parser checks with `python -m unittest discover -s tests`. These checks use a mocked analyzer and do not validate model inference or clinical performance.
+The response includes an analysis ID and the path of the generated PDF on the server (there is no download endpoint).
+
+| Method | Route | Role | Description |
+| --- | --- | --- | --- |
+| `GET` | `/health/live` | none | Process liveness |
+| `GET` | `/` | reader | Service health summary |
+| `GET` | `/health/ready` | reader | Model readiness |
+| `GET` | `/reports` | reader | List completed local PDF reports |
+| `GET` | `/model-status` | reader | Model load state |
+| `POST` | `/analyze-and-report` | operator | Upload an image, analyze it, write a PDF to `reports/` |
+| `POST` | `/load-model` | admin | Reload the model |
+| `POST` | `/analyze-url` | operator | Analyze an image from a URL *(requires `ENABLE_URL_FETCH=true`)* |
+| `POST` | `/analyze-url-and-report` | operator | URL analysis + S3 upload + MySQL record *(also requires AWS and MySQL)* |
+
+Roles are shared service credentials, not user accounts: all keys see the same report namespace. Interactive API docs are off by default (`ENABLE_API_DOCS=true` enables them; use only on a trusted network).
+
+## Configuration
+
+All settings are read from the environment or `.env`; [`samplenv`](samplenv) documents each one.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `API_KEY_ADMIN` | **required** | Admin key (≥ 32 chars, unique). `API_KEY_OPERATOR` / `API_KEY_READER` are optional. Each can be read from a file via `API_KEY_<ROLE>_FILE`. |
+| `MODEL_ID` | `google/medgemma-1.5-4b-it` | Hugging Face model to load |
+| `MEDGEMMA_QUANTIZE` | `auto` | `auto` = 4-bit on CUDA and full precision on CPU; `1` / `0` force it on or off |
+| `ENABLE_API_DOCS` | `false` | Expose `/docs` and `/openapi.json` |
+| `ENABLE_URL_FETCH` | `false` | Enable the URL routes |
+| `MYSQL_*`, `AWS_REGION`, `AWS_S3_BUCKET_NAME` | unset | Only needed for `/analyze-url-and-report`; see `db.py` for the `xray_reports` table schema |
+
+## Testing
+
+```shell
+python -m unittest discover -s tests -v
+```
+
+The suite covers image and URL validation, auth, limits, API behaviour, concurrency, PDF output and failed-report cleanup. Inference is mocked, so it doesn't need a GPU or model download. Parser and report tests don't even import PyTorch:
+
+```shell
+python -m unittest discover -s tests -p "test_findings.py" -v
+python -m unittest discover -s tests -p "test_reports.py" -v
+```
+
+Opt-in tests against local MySQL and S3-compatible storage (`RUN_STORAGE_INTEGRATION=1`) and a real model smoke test (`RUN_MODEL_SMOKE=1`) are described in [docs/deployment.md](docs/deployment.md).
+
+## Project structure
+
+```text
+main.py                 ASGI entry point (uvicorn main:app)
+app.py                  CLI launcher
+src/api/                FastAPI app, schemas, API-key auth, request limits
+src/core/               MedGemma analyzer and findings parser
+src/services/           Image upload and URL validation
+src/reports/            PDF rendering and atomic report storage
+db.py, aws_utils.py     Optional MySQL and S3 integration
+tests/                  Unit, API and opt-in integration tests
+docs/deployment.md      Access control, containers, integration tests, dependency updates
+```
+
+## Limitations
+
+- The model, prompt, parser and full application have **not been clinically evaluated**.
+- Only pneumothorax is assessed; MedGemma's broader capabilities aren't used. Earlier attention-map visualizations were removed because they aren't validated localizations.
+- The S3 and MySQL steps aren't transactional, so a database failure after an upload can leave an unreferenced S3 object.
+- There's no distributed rate limiting, per-user isolation or audit trail. Keep the service on a trusted network behind a TLS proxy.
+
+See [docs/deployment.md](docs/deployment.md) for deployment guidance. Contributions and independent evaluations are welcome.
+
+## License
+
+The code in this repository is released under the [MIT License](LICENSE).
+
+This license doesn't cover third-party components. MedGemma is subject to Google's [Health AI Developer Foundations terms](https://developers.google.com/health-ai-developer-foundations/terms), and the fonts in `assets/` remain under their original licenses.
