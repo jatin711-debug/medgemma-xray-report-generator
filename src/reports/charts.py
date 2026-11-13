@@ -84,6 +84,9 @@ class DecisionGauge(_Chart):
     """
 
     TRACK_Y, TRACK_H = 14.0, 6.0
+    LABEL_SIZE, LABEL_GAP = 7.0, 4.0
+    # Band labels may extend this far past the track ends, into the panel's cell padding.
+    LABEL_OVERHANG = 8.0
     BANDS = (("No flag", HEX["gray_300"]), ("Review", HEX["amber_500"]),
              ("Suspected", HEX["danger_bar"]))
 
@@ -104,6 +107,29 @@ class DecisionGauge(_Chart):
         return [(label, color, edges[i], edges[i + 1])
                 for i, (label, color) in enumerate(self.BANDS) if edges[i + 1] > edges[i]]
 
+    def label_positions(self) -> list[tuple[str, float]]:
+        """(label, left x) for each band label that can be placed readably.
+
+        A label is centred on its band, then nudged to stay within the allowed overhang and
+        clear of the previous label. It is skipped if its centre would leave its band, so a
+        label never reads as naming its neighbour.
+        """
+        placed, previous_end = [], -math.inf
+        for label, _, start, end in self._segments():
+            if not label:
+                continue
+            text_width = pdfmetrics.stringWidth(label, self.font, self.LABEL_SIZE)
+            left = (start + end - text_width) / 2
+            left = min(max(left, -self.LABEL_OVERHANG),
+                       self.width + self.LABEL_OVERHANG - text_width)
+            left = max(left, previous_end + self.LABEL_GAP)
+            if (left + text_width > self.width + self.LABEL_OVERHANG
+                    or not start <= left + text_width / 2 <= end):
+                continue
+            placed.append((label, left))
+            previous_end = left + text_width
+        return placed
+
     def draw(self):
         canvas, width = self.canv, self.width
         segments = self._segments()
@@ -116,11 +142,10 @@ class DecisionGauge(_Chart):
             canvas.rect(start, self.TRACK_Y, end - start, self.TRACK_H, stroke=0, fill=1)
         canvas.restoreState()
 
-        canvas.setFont(self.font, 7)
+        canvas.setFont(self.font, self.LABEL_SIZE)
         canvas.setFillColor(PALETTE["gray_600"])
-        for label, _, start, end in segments:
-            if label and pdfmetrics.stringWidth(label, self.font, 7) + 4 < end - start:
-                canvas.drawCentredString((start + end) / 2, 27, label)
+        for label, left in self.label_positions():
+            canvas.drawString(left, 27, label)
         if len(segments) == 1:
             canvas.drawString(0, 27, "Uncalibrated score: no cutoff applies")
 

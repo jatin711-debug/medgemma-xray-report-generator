@@ -100,10 +100,10 @@ def decide(score: Optional[float], calibration: Optional[Calibration]) -> Decisi
                         "cannot be interpreted.")
     if score >= calibration.detected_threshold:
         return Decision(DETECTED, "detected", score, calibration,
-                        "The score is at or above the 'suspected' threshold.")
+                        "The score is at or above the suspected threshold.")
     if score >= calibration.review_threshold:
         return Decision(REVIEW, "review", score, calibration,
-                        "The score is in the review band: below the 'suspected' threshold but high "
+                        "The score is in the review band: below the suspected threshold but high "
                         "enough that a pneumothorax cannot be ruled out.")
     return Decision(NEGATIVE, "negative", score, calibration,
                     "The score is below the review threshold.")

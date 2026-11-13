@@ -52,7 +52,7 @@ def answer_agrees(answer: str | None, band: str) -> bool | None:
 def findings_from_decision(decision: Decision, raw_response: str) -> RadiologyFindings:
     """Report the calibrated outcome; the generated text is recorded but does not decide."""
     abnormality = {
-        "detected": "Calibrated decision score is in the 'suspected' band for pneumothorax.",
+        "detected": "Calibrated decision score is in the suspected band for pneumothorax.",
         "review": "Calibrated decision score is in the review band; pneumothorax is not ruled out.",
         "negative": "Calibrated decision score is below the review threshold.",
     }.get(decision.band, decision.reason)

@@ -40,6 +40,12 @@ ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 PREVIEW_MAX_SIDE = 1000
 NOT_RECORDED = "Not recorded"
 MARGIN = 40
+TOP_MARGIN, BOTTOM_MARGIN = 58, 56
+FRAME_PADDING = 6  # SimpleDocTemplate's frame pads every side by 6 pt
+# Page 1 is the summary: if a tall image, a two-line outcome or a long reason would push the
+# limitations box onto page 2, the figure shrinks (down to FIGURE_MIN_HEIGHT) instead.
+FIGURE_MAX_HEIGHT, FIGURE_MIN_HEIGHT = 220, 140
+PAGE_ONE_HEIGHT = letter[1] - TOP_MARGIN - BOTTOM_MARGIN - 2 * FRAME_PADDING
 REASONING_PREVIEW_CHARS = 320
 WHITE_PIXEL_FLAG_PCT = 5.0
 NARROW_RANGE_LEVELS = 100
@@ -86,6 +92,24 @@ def _sentence_case(text: str) -> str:
 
 def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def fit_text(text: str, font: str, size: float, max_width: float) -> str:
+    """Shorten text to fit on one line, keeping its start and its end (e.g. a file extension)."""
+    def width(value: str) -> float:
+        return pdfmetrics.stringWidth(value, font, size)
+    if width(text) <= max_width:
+        return text
+    head, tail = text[:(len(text) + 1) // 2], text[(len(text) + 1) // 2:]
+    while head or tail:
+        if len(head) >= len(tail):
+            head = head[:-1]
+        else:
+            tail = tail[1:]
+        candidate = head + "…" + tail
+        if width(candidate) <= max_width:
+            return candidate
+    return "…"
 
 
 def _format_bytes(size) -> Optional[str]:
@@ -143,9 +167,11 @@ def _interval(values, flip: bool = False) -> Optional[str]:
     return f"{format_percent(estimate)} ({format_percent(low)}–{format_percent(high)})"
 
 
-def _rate(value: float) -> str:
+def _rate(value: float, decimals: Optional[int] = None) -> str:
     """A share as a percentage, with one decimal below 10% so small rates stay distinct."""
-    return f"{value * 100:.1f}%" if value < 0.095 else format_percent(value)
+    if decimals is None:
+        decimals = 1 if value < 0.095 else 0
+    return f"{value * 100:.1f}%" if decimals else format_percent(value)
 
 
 def band_evidence(decision: dict) -> Optional[str]:
@@ -157,8 +183,10 @@ def band_evidence(decision: dict) -> Optional[str]:
     if (prevalence is None or not isinstance(share, list) or len(share) != 3
             or not all(isinstance(v, (int, float)) for v in share)):
         return None
-    return (f"In the reference data, {_rate(share[0])} ({_rate(share[1])}–{_rate(share[2])}) of "
-            f"images in this band had a pneumothorax, against {_rate(prevalence)} overall.")
+    # The interval uses the estimate's precision, so '9.4% (7.4%–11.6%)', not '(7.4%–12%)'.
+    estimate, low, high = (_rate(value, 1 if share[0] < 0.095 else 0) for value in share)
+    return (f"In the reference data, {estimate} ({low}–{high}) of images in this band had a "
+            f"pneumothorax, against {_rate(prevalence)} overall.")
 
 
 def calibration_table(decision: dict) -> Optional[tuple[str, list[tuple[str, str, str]]]]:
@@ -413,14 +441,18 @@ class UltimatePDFGenerator:
         cells = [
             ("Analysis ID", short_id, "Full ID in footer" if short_id != analysis_id else None),
             ("Generated", _format_timestamp(response.timestamp, compact=True), None),
-            ("Image", _truncate(source.rsplit("/", 1)[-1], 28), image_sub),
-            ("Model", _truncate(str(info.get("model_id") or NOT_RECORDED).split("/")[-1], 26),
+            ("Image", source.rsplit("/", 1)[-1], image_sub),
+            ("Model", str(info.get("model_id") or NOT_RECORDED).split("/")[-1],
              " · ".join(part for part in runtime if part) or None),
         ]
+        # One line per value: long names are shortened in the middle (full values are under
+        # Technical details) instead of wrapping mid-word.
+        value_style = self.styles["meta_value"]
+        text_width = width / 4 - 9 - 6
         row = []
         for label, value, sub in cells:
-            cell = [self._label(label), Spacer(1, 2),
-                    Paragraph(escape(value), self.styles["meta_value"])]
+            value = fit_text(value, value_style.fontName, value_style.fontSize, text_width)
+            cell = [self._label(label), Spacer(1, 2), Paragraph(escape(value), value_style)]
             if sub:
                 cell.append(Paragraph(escape(sub), self.styles["meta_sub"]))
             row.append(cell)
@@ -533,8 +565,7 @@ class UltimatePDFGenerator:
         return table
 
     def _figure(self, response, image: Image.Image, attribution: Optional[AttributionMap],
-                width: float) -> list:
-        max_height = 220
+                width: float, max_height: float = FIGURE_MAX_HEIGHT) -> list:
         if attribution is None:
             single = Table([[self._fit_image(image, width * 0.55, max_height)]], colWidths=[width])
             single.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER")]))
@@ -793,10 +824,9 @@ class UltimatePDFGenerator:
         logger.info("Successfully generated experimental PDF report")
         return str(destination)
 
-    def _story(self, response, image: Image.Image, attribution: Optional[AttributionMap],
-               width: float) -> list:
-        summary = summarize_evidence(attribution.grid) if attribution is not None else None
-        story = [
+    def _page_one(self, response, image: Image.Image, attribution: Optional[AttributionMap],
+                  width: float, figure_height: float) -> list:
+        return [
             Paragraph("Pneumothorax Research Report", self.styles["title"]),
             Paragraph("Single chest X-ray analysed by an experimental MedGemma pipeline. "
                       "For research only; not for clinical use.", self.styles["subtitle"]),
@@ -804,10 +834,52 @@ class UltimatePDFGenerator:
             Spacer(1, 10),
             self._result_panel(response, width),
             self._section("Attribution map" if attribution is not None else "Input image",
-                          self._figure(response, image, attribution, width)),
+                          self._figure(response, image, attribution, width, figure_height)),
             Spacer(1, 10),
             self._limitations(width),
         ]
+
+    @staticmethod
+    def _flatten(flowables: list) -> list:
+        """KeepTogether reports a huge height to force a split, so measure its content instead."""
+        flat = []
+        for flowable in flowables:
+            if isinstance(flowable, KeepTogether):
+                flat += UltimatePDFGenerator._flatten(flowable._content)
+            else:
+                flat.append(flowable)
+        return flat
+
+    @classmethod
+    def _stacked_height(cls, flowables: list, width: float) -> float:
+        """Height the flowables take at the top of a fresh frame.
+
+        Mirrors Frame._add: no space before the first flowable, adjacent spaces overlap (the
+        larger of space-after and the next space-before), and the last space-after is free.
+        """
+        canvas = Canvas(io.BytesIO())
+        total, previous_after = 0.0, None
+        for flowable in cls._flatten(flowables):
+            _, height = flowable.wrapOn(canvas, width - 2 * FRAME_PADDING, 10_000)
+            if previous_after is not None:
+                total += previous_after + max(flowable.getSpaceBefore() - previous_after, 0)
+            total += height
+            previous_after = flowable.getSpaceAfter()
+        return total
+
+    def _story(self, response, image: Image.Image, attribution: Optional[AttributionMap],
+               width: float, page_height: float = PAGE_ONE_HEIGHT) -> list:
+        summary = summarize_evidence(attribution.grid) if attribution is not None else None
+        figure_height = FIGURE_MAX_HEIGHT
+        story = self._page_one(response, image, attribution, width, figure_height)
+        for _ in range(4):
+            # The images are the only flexible part. A width-limited image shrinks by less than
+            # the cap does, so re-measure until the page fits or the floor is reached.
+            overflow = self._stacked_height(story, width) - page_height
+            if overflow <= 0 or figure_height <= FIGURE_MIN_HEIGHT:
+                break
+            figure_height = max(FIGURE_MIN_HEIGHT, figure_height - math.ceil(overflow) - 2)
+            story = self._page_one(response, image, attribution, width, figure_height)
         if summary is not None:
             story.append(self._section(
                 "Attribution by region",
@@ -828,8 +900,8 @@ class UltimatePDFGenerator:
                           attribution: Optional[AttributionMap], filepath: str) -> None:
         """Render the document to a private temporary path before publication."""
         doc = SimpleDocTemplate(
-            filepath, pagesize=letter, rightMargin=MARGIN, leftMargin=MARGIN, topMargin=58,
-            bottomMargin=56, title="Pneumothorax research report",
+            filepath, pagesize=letter, rightMargin=MARGIN, leftMargin=MARGIN, topMargin=TOP_MARGIN,
+            bottomMargin=BOTTOM_MARGIN, title="Pneumothorax research report",
             author="MedGemma research prototype", subject="Experimental model output",
         )
         on_page = partial(self._draw_page_template, analysis_id=response.analysis_id)

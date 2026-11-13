@@ -1,4 +1,6 @@
 """Local report publication checks without importing the model runtime."""
+import itertools
+import json
 import re
 import tempfile
 import unittest
@@ -8,17 +10,23 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 from PIL import Image
-from reportlab.platypus import KeepTogether, Paragraph, Table
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfbase import pdfmetrics
+from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Table
 
 from src.api.schemas import AnalysisResponse, RadiologyFindings
 from src.core.decision import DETECTED, INDETERMINATE, NEGATIVE, REVIEW, Calibration, decide
 from src.core.findings import answer_agrees
 from src.core.heatmap import AttributionMap, relevance_grid, summarize_evidence
 from src.core.image_quality import image_statistics
-from src.reports.generator import (NOT_RECORDED, UltimatePDFGenerator, band_evidence, border_note,
-                                   calibration_table, decision_score, image_check_flags,
+from src.reports.charts import DecisionGauge
+from src.reports.generator import (BOTTOM_MARGIN, MARGIN, NOT_RECORDED, PAGE_ONE_HEIGHT,
+                                   TOP_MARGIN, UltimatePDFGenerator, band_evidence, border_note,
+                                   calibration_table, decision_score, fit_text, image_check_flags,
                                    outcome_tone, region_headline, text_answer_note)
 from src.reports.storage import atomic_report, list_local_reports, report_path
+
+DOCUMENT_WIDTH = letter[0] - 2 * MARGIN
 
 
 def page_count(path) -> int:
@@ -124,7 +132,9 @@ def paragraph_texts(flowables):
         elif isinstance(item, Table):
             for row in item._cellvalues:
                 for cell in row:
-                    yield from paragraph_texts(cell if isinstance(cell, list) else [cell])
+                    # A wrapped table stores list cells as tuples.
+                    nested = cell if isinstance(cell, (list, tuple)) else [cell]
+                    yield from paragraph_texts(nested)
 
 
 def signed_attribution(score: float) -> AttributionMap:
@@ -213,6 +223,37 @@ class ReportGenerationTests(unittest.TestCase):
                     path = self.generator.generate_pdf_report(response, image,
                                                               signed_attribution(score))
                     self.assertEqual(page_count(path), 2)
+
+    def test_summary_page_keeps_the_limitations_on_page_one(self):
+        # A real run put the limitations box (and then Method) a page late: a portrait image,
+        # the two-line review title and a long file name together overflowed page 1.
+        long_name = "05-Spontanpneumothorax-follow-up-film-with-an-unusually-long-name.jpg"
+        cases = ((REVIEW, -2.3, "Pneumothorax detected"),
+                 (DETECTED, 2.4, "No pneumothorax detected"),
+                 (NEGATIVE, -7.5, "Pneumothorax detected"))
+        # 'shorter' takes 40 pt off the page so that the figure has to shrink to fit.
+        for size, (impression, score, answer), shorter in itertools.product(
+                ((600, 1100), (1060, 1227), (952, 956), (1920, 1557)), cases, (0, 40)):
+            with self.subTest(size=size, impression=impression, shorter=shorter):
+                image = Image.new("RGB", size, (90, 90, 90))
+                response = full_response(impression, ONE_SENTENCE.format(finding=answer),
+                                         score, image, decision=decision_for(score, answer))
+                response.image_metadata["filename"] = long_name
+                response.analysis_id = f"fit-{size[0]}x{size[1]}-{impression.split()[0]}"
+                story = self.generator._story(response, image, signed_attribution(score),
+                                              DOCUMENT_WIDTH, PAGE_ONE_HEIGHT - shorter)
+                page_one = next(index for index, item in enumerate(story)
+                                if "Experimental research output" in
+                                " ".join(paragraph_texts([item])))
+                path = Path(self.directory.name) / f"{response.analysis_id}-{shorter}-p1.pdf"
+                SimpleDocTemplate(str(path), pagesize=letter, leftMargin=MARGIN,
+                                  rightMargin=MARGIN, topMargin=TOP_MARGIN + shorter,
+                                  bottomMargin=BOTTOM_MARGIN).build(story[:page_one + 1])
+                self.assertEqual(page_count(path), 1)
+                if not shorter:
+                    report = self.generator.generate_pdf_report(response, image,
+                                                                signed_attribution(score))
+                    self.assertEqual(page_count(report), 2)
 
     def test_generated_text_is_kept_in_full_and_labelled_as_not_deciding(self):
         reasoning = "Long reasoning sentence number {}. "
@@ -362,8 +403,38 @@ class ReportContentTests(unittest.TestCase):
     def test_band_evidence_needs_band_rates_and_prevalence(self):
         self.assertIn("0.9% (0.6%–1.3%)", band_evidence(decision_for(-9.0)))
         self.assertIn("36% (28%–44%)", band_evidence(decision_for(5.0)))
+        # The interval takes the estimate's precision rather than mixing '7.4%' with '12%'.
+        straddling = {"band": "review", "calibration": {"prevalence": 0.0544, "cross_validated": {
+            "bands": {"review": {"positive_share": [0.094, 0.074, 0.116]}}}}}
+        self.assertIn("9.4% (7.4%–11.6%)", band_evidence(straddling))
         self.assertIsNone(band_evidence(decision_for(3.0, None, None)))
         self.assertIsNone(band_evidence({"band": "review", "calibration": {"prevalence": 0.05}}))
+
+    def test_long_values_are_shortened_to_one_line_keeping_the_extension(self):
+        name = "05-Spontanpneumothorax-follow-up-film.jpg"
+        short = fit_text(name, "Helvetica-Bold", 10, 110)
+        self.assertLessEqual(pdfmetrics.stringWidth(short, "Helvetica-Bold", 10), 110)
+        self.assertTrue(short.startswith("05-Spont") and short.endswith(".jpg"))
+        self.assertIn("…", short)
+        self.assertEqual(fit_text("a.png", "Helvetica-Bold", 10, 110), "a.png")
+
+    def test_gauge_labels_every_band_for_each_shipped_calibration(self):
+        # The report's gauge width: the score column minus its cell padding.
+        width = DOCUMENT_WIDTH - DOCUMENT_WIDTH * 0.53 - 2 * 14
+        entries = json.loads((Path(__file__).resolve().parents[1] / "src/core/calibration.json")
+                             .read_text(encoding="utf-8"))
+        for entry in entries["entries"]:
+            with self.subTest(precision=entry["precision"]):
+                gauge = DecisionGauge(0.0, width, self.generator.fonts,
+                                      entry["review_threshold"], entry["detected_threshold"])
+                placed = gauge.label_positions()
+                self.assertEqual([label for label, _ in placed], ["No flag", "Review", "Suspected"])
+                ends = [left + pdfmetrics.stringWidth(label, gauge.font, gauge.LABEL_SIZE)
+                        for label, left in placed]
+                for (_, left), previous_end in zip(placed[1:], ends):
+                    self.assertGreaterEqual(left, previous_end)
+                self.assertGreaterEqual(placed[0][1], -gauge.LABEL_OVERHANG)
+                self.assertLessEqual(ends[-1], width + gauge.LABEL_OVERHANG)
 
     def test_calibration_table_reports_both_bands_or_nothing(self):
         caption, rows = calibration_table(decision_for(0.0))
