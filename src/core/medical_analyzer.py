@@ -12,16 +12,21 @@ from fastapi.concurrency import run_in_threadpool
 from PIL import Image
 import torch
 import transformers
-from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
+from transformers import (AutoImageProcessor, AutoModelForImageTextToText, AutoProcessor,
+                          BitsAndBytesConfig)
 from src.api.schemas import AnalysisResponse, RadiologyFindings
 from src.services.image_input import fetch_image, read_upload
-from src.core.attribution import compute_pneumothorax_attribution
-from src.core.findings import parse_ai_response
+from src.core.attribution import compute_pneumothorax_attribution, compute_pneumothorax_score
+from src.core.decision import Decision, decide, find_calibration
+from src.core.findings import answer_agrees, findings_from_decision
 from src.core.heatmap import AttributionMap
 from src.core.image_quality import image_statistics
+from src.core.prompt import build_messages, prompt_fingerprint
 from src.core.version import app_version
 
 logger = logging.getLogger(__name__)
+
+IMAGE_PROCESSOR_BACKEND = "pil"
 
 
 def attribution_enabled() -> bool:
@@ -34,6 +39,7 @@ class InferenceResult:
     """One model run: text output, parsed findings, optional attribution and timings."""
     raw_response: str
     findings: RadiologyFindings
+    decision: Optional[Decision] = None
     attribution: Optional[AttributionMap] = None
     attribution_info: Dict[str, Any] = field(default_factory=lambda: {"status": "disabled"})
     timings: Dict[str, float] = field(default_factory=dict)
@@ -159,7 +165,11 @@ class MedicalImageAnalyzer:
                     bnb_4bit_quant_type="nf4",
                     bnb_4bit_compute_dtype=torch.bfloat16,
                 )
-            self.processor = AutoProcessor.from_pretrained(self.model_id, use_fast=True)
+            self.processor = AutoProcessor.from_pretrained(self.model_id)
+            # Pin image preprocessing: transformers otherwise switches to a torchvision resizer
+            # whenever torchvision is installed, which shifts the calibrated decision score.
+            self.processor.image_processor = AutoImageProcessor.from_pretrained(
+                self.model_id, backend=IMAGE_PROCESSOR_BACKEND)
             self.model = AutoModelForImageTextToText.from_pretrained(
                 self.model_id,
                 quantization_config=quantization_config,
@@ -208,10 +218,6 @@ class MedicalImageAnalyzer:
         return {"model_id": self.model_id, **self.runtime, "app_version": app_version(),
                 "torch": torch.__version__, "transformers": transformers.__version__}
 
-    def parse_ai_response(self, raw_response: str) -> RadiologyFindings:
-        """Delegate parsing to the standalone, model-independent parser."""
-        return parse_ai_response(raw_response)
-
     async def analyze_image(self, image: Image.Image) -> InferenceResult:
         """
         Perform AI-powered medical image analysis using Med-GEMMA.
@@ -223,29 +229,8 @@ class MedicalImageAnalyzer:
 
     @staticmethod
     def _messages(image: Image.Image) -> list[dict]:
-        """Build the pneumothorax prompt; attribution reuses it unchanged."""
-        return [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": "You are a highly experienced radiologist. You analyze chest X-rays for critical findings, especially pneumothorax."}]
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "Review this chest X-ray carefully for signs of pneumothorax, including loss of lung markings, "
-                            "pleural line visibility, and increased radiolucency.\n\n"
-                            "Respond strictly in the following format:\n\n"
-                            "**Finding**: [Pneumothorax detected | No pneumothorax detected | Indeterminate]\n"
-                            "**Brief Reasoning**: [One-sentence justification]"
-                        )
-                    },
-                    {"type": "image", "image": image}
-                ]
-            }
-        ]
+        """Build the pneumothorax prompt; scoring and attribution reuse it unchanged."""
+        return build_messages(image)
 
     def _analyze_image(self, image: Image.Image) -> InferenceResult:
         """Run synchronous inference while the caller holds the model lock."""
@@ -265,13 +250,25 @@ class MedicalImageAnalyzer:
                 output = self.model.generate(**inputs, max_new_tokens=256, do_sample=False)
             generation_seconds = time.perf_counter() - started
             raw_response = self.processor.decode(output[0][input_len:], skip_special_tokens=True)
-            findings = self.parse_ai_response(raw_response)
         except Exception as e:
             logger.exception("Image analysis failed")
             raise HTTPException(status_code=500, detail="Image analysis failed") from e
 
-        result = InferenceResult(raw_response=raw_response, findings=findings,
-                                 timings={"generation_seconds": round(generation_seconds, 2)})
+        started = time.perf_counter()
+        try:
+            score: Optional[float] = compute_pneumothorax_score(self.model, self.processor, messages)
+        except Exception:
+            logger.warning("Decision score could not be computed", exc_info=True)
+            score = None
+        scoring_seconds = time.perf_counter() - started
+        calibration = find_calibration(self.model_id, self.runtime.get("precision", ""),
+                                       prompt_fingerprint())
+        decision = decide(score, calibration)
+        result = InferenceResult(raw_response=raw_response,
+                                 findings=findings_from_decision(decision, raw_response),
+                                 decision=decision,
+                                 timings={"generation_seconds": round(generation_seconds, 2),
+                                          "scoring_seconds": round(scoring_seconds, 2)})
         self._attach_attribution(result, messages)
         return result
 
@@ -299,12 +296,18 @@ class MedicalImageAnalyzer:
     def _make_response(self, result: InferenceResult, metadata: dict,
                        image: Image.Image) -> AnalysisResponse:
         """Build a response using a UTC timestamp and a generated identifier."""
+        decision = result.decision.as_dict() if result.decision is not None else {}
+        if result.decision is not None:
+            decision["prompt_fingerprint"] = prompt_fingerprint()
+            decision["text_answer"] = result.findings.model_text_answer
+            decision["text_agrees"] = answer_agrees(result.findings.model_text_answer,
+                                                    result.decision.band)
         return AnalysisResponse(
             analysis_id=str(uuid.uuid4()), timestamp=datetime.now(timezone.utc).isoformat(),
             findings=result.findings, raw_response=result.raw_response,
             image_metadata={**metadata, "image_check": image_statistics(image)},
             model_info=self.model_info(), timings=dict(result.timings),
-            attribution=dict(result.attribution_info),
+            attribution=dict(result.attribution_info), decision=decision,
         )
 
     async def analyze_image_from_upload(

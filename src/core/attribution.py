@@ -75,19 +75,35 @@ def _append_tokens(batch: dict, tokens: list[int]) -> dict:
     return extended
 
 
+def _decision_batch(model, processor, messages) -> tuple[dict, int, int]:
+    """Encode the prompt, force the shared answer prefix, and return the two answer token IDs."""
+    forced, positive_id, negative_id = decision_tokens(processor.tokenizer)
+    inputs = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True,
+                                           return_dict=True, return_tensors="pt")
+    batch = {key: value.to(model.device) if torch.is_tensor(value) else value
+             for key, value in dict(inputs).items()}
+    return _append_tokens(batch, forced), positive_id, negative_id
+
+
+def compute_pneumothorax_score(model, processor, messages) -> float:
+    """Return logit('Pneumothorax detected') - logit('No pneumothorax detected').
+
+    One forward pass without gradients. This is the score the decision bands
+    are calibrated on, so calibration and the app must both use this function.
+    """
+    batch, positive_id, negative_id = _decision_batch(model, processor, messages)
+    with torch.inference_mode():
+        logits = model(**batch, use_cache=False, logits_to_keep=1).logits[0, -1].float()
+    return float(logits[positive_id] - logits[negative_id])
+
+
 def compute_pneumothorax_attribution(model, processor, messages) -> AttributionMap:
     """Run one gradient pass and return the image-token relevance map.
 
     Only the image tokens are made differentiable, so no gradients are
     computed for the vision encoder or any model weights.
     """
-    forced, positive_id, negative_id = decision_tokens(processor.tokenizer)
-    inputs = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True,
-                                           return_dict=True, return_tensors="pt")
-    device = model.device
-    batch = {key: value.to(device) if torch.is_tensor(value) else value
-             for key, value in dict(inputs).items()}
-    batch = _append_tokens(batch, forced)
+    batch, positive_id, negative_id = _decision_batch(model, processor, messages)
 
     captured: dict[str, torch.Tensor] = {}
 

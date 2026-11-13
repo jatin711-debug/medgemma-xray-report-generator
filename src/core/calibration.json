@@ -1,0 +1,247 @@
+{
+  "entries": [
+    {
+      "score": "logit('Pneumothorax detected') - logit('No pneumothorax detected')",
+      "model_id": "google/medgemma-1.5-4b-it",
+      "precision": "bfloat16",
+      "prompt_fingerprint": "7178781b7c89fa60",
+      "review_threshold": -3.5,
+      "detected_threshold": 6.75,
+      "targets": {
+        "review_sensitivity": 0.9,
+        "detected_specificity": 0.95
+      },
+      "reference": {
+        "labels": "Majkowska et al., Radiology 2020 (radiologist-adjudicated), via torchxrayvision 1.5.7",
+        "images": "NIH ChestX-ray14, hf://datasets/iraqigold/nih-chest-xray-14-flat@98fdac982847ed878cb68065d9e9f66998a79689",
+        "n_images": 4376,
+        "n_positive": 238,
+        "n_patients": 1695
+      },
+      "auc": [
+        0.8849,
+        0.8605,
+        0.9075
+      ],
+      "prevalence": 0.0544,
+      "cross_validated": {
+        "review": {
+          "sensitivity": [
+            0.895,
+            0.8541,
+            0.9339
+          ],
+          "specificity": [
+            0.6438,
+            0.6113,
+            0.6744
+          ],
+          "flagged_share": 0.3855
+        },
+        "detected": {
+          "sensitivity": [
+            0.4664,
+            0.397,
+            0.5356
+          ],
+          "specificity": [
+            0.9517,
+            0.9337,
+            0.9648
+          ],
+          "flagged_share": 0.0711
+        },
+        "bands": {
+          "detected": {
+            "positive_share": [
+              0.3569,
+              0.2772,
+              0.4419
+            ],
+            "image_share": 0.0711
+          },
+          "review": {
+            "positive_share": [
+              0.0741,
+              0.0574,
+              0.0929
+            ],
+            "image_share": 0.3144
+          },
+          "negative": {
+            "positive_share": [
+              0.0093,
+              0.0057,
+              0.0133
+            ],
+            "image_share": 0.6145
+          }
+        }
+      },
+      "created": "2026-11-13",
+      "app_version": "01a61acbe400-dirty"
+    },
+    {
+      "score": "logit('Pneumothorax detected') - logit('No pneumothorax detected')",
+      "model_id": "google/medgemma-1.5-4b-it",
+      "precision": "4-bit NF4 weights, bfloat16 compute",
+      "prompt_fingerprint": "7178781b7c89fa60",
+      "review_threshold": 4.625,
+      "detected_threshold": 9.5,
+      "targets": {
+        "review_sensitivity": 0.9,
+        "detected_specificity": 0.95
+      },
+      "reference": {
+        "labels": "Majkowska et al., Radiology 2020 (radiologist-adjudicated), via torchxrayvision 1.5.7",
+        "images": "NIH ChestX-ray14, hf://datasets/iraqigold/nih-chest-xray-14-flat@98fdac982847ed878cb68065d9e9f66998a79689",
+        "n_images": 4376,
+        "n_positive": 238,
+        "n_patients": 1695
+      },
+      "auc": [
+        0.8889,
+        0.862,
+        0.9117
+      ],
+      "prevalence": 0.0544,
+      "cross_validated": {
+        "review": {
+          "sensitivity": [
+            0.8992,
+            0.856,
+            0.9371
+          ],
+          "specificity": [
+            0.6979,
+            0.6668,
+            0.7283
+          ],
+          "flagged_share": 0.3346
+        },
+        "detected": {
+          "sensitivity": [
+            0.4454,
+            0.3714,
+            0.5131
+          ],
+          "specificity": [
+            0.95,
+            0.9257,
+            0.9658
+          ],
+          "flagged_share": 0.0715
+        },
+        "bands": {
+          "detected": {
+            "positive_share": [
+              0.3387,
+              0.2493,
+              0.4423
+            ],
+            "image_share": 0.0715
+          },
+          "review": {
+            "positive_share": [
+              0.0938,
+              0.0742,
+              0.1162
+            ],
+            "image_share": 0.263
+          },
+          "negative": {
+            "positive_share": [
+              0.0082,
+              0.0051,
+              0.0117
+            ],
+            "image_share": 0.6654
+          }
+        }
+      },
+      "created": "2026-11-13",
+      "app_version": "01a61acbe400-dirty"
+    },
+    {
+      "score": "logit('Pneumothorax detected') - logit('No pneumothorax detected')",
+      "model_id": "google/medgemma-1.5-4b-it",
+      "precision": "float32",
+      "prompt_fingerprint": "7178781b7c89fa60",
+      "review_threshold": -3.145,
+      "detected_threshold": 6.5648,
+      "targets": {
+        "review_sensitivity": 0.9,
+        "detected_specificity": 0.95
+      },
+      "reference": {
+        "labels": "Majkowska et al., Radiology 2020 (radiologist-adjudicated), via torchxrayvision 1.5.7",
+        "images": "NIH ChestX-ray14, hf://datasets/iraqigold/nih-chest-xray-14-flat@98fdac982847ed878cb68065d9e9f66998a79689",
+        "n_images": 4376,
+        "n_positive": 238,
+        "n_patients": 1695
+      },
+      "auc": [
+        0.8846,
+        0.8594,
+        0.9071
+      ],
+      "prevalence": 0.0544,
+      "cross_validated": {
+        "review": {
+          "sensitivity": [
+            0.8908,
+            0.8461,
+            0.9296
+          ],
+          "specificity": [
+            0.675,
+            0.6438,
+            0.7067
+          ],
+          "flagged_share": 0.3558
+        },
+        "detected": {
+          "sensitivity": [
+            0.4664,
+            0.3913,
+            0.5395
+          ],
+          "specificity": [
+            0.9483,
+            0.928,
+            0.9627
+          ],
+          "flagged_share": 0.0743
+        },
+        "bands": {
+          "detected": {
+            "positive_share": [
+              0.3415,
+              0.2638,
+              0.4272
+            ],
+            "image_share": 0.0743
+          },
+          "review": {
+            "positive_share": [
+              0.082,
+              0.064,
+              0.1028
+            ],
+            "image_share": 0.2815
+          },
+          "negative": {
+            "positive_share": [
+              0.0092,
+              0.0057,
+              0.013
+            ],
+            "image_share": 0.6442
+          }
+        }
+      },
+      "created": "2026-11-13",
+      "app_version": "01a61acbe400-dirty"
+    }
+  ]
+}

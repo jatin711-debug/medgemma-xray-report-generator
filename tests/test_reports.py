@@ -11,16 +11,39 @@ from PIL import Image
 from reportlab.platypus import KeepTogether, Paragraph, Table
 
 from src.api.schemas import AnalysisResponse, RadiologyFindings
+from src.core.decision import DETECTED, INDETERMINATE, NEGATIVE, REVIEW, Calibration, decide
+from src.core.findings import answer_agrees
 from src.core.heatmap import AttributionMap, relevance_grid, summarize_evidence
 from src.core.image_quality import image_statistics
-from src.reports.generator import (NOT_RECORDED, UltimatePDFGenerator, answer_preference,
-                                   border_note, image_check_flags, outcome_tone,
-                                   region_headline, score_agreement)
+from src.reports.generator import (NOT_RECORDED, UltimatePDFGenerator, band_evidence, border_note,
+                                   calibration_table, decision_score, image_check_flags,
+                                   outcome_tone, region_headline, text_answer_note)
 from src.reports.storage import atomic_report, list_local_reports, report_path
 
 
 def page_count(path) -> int:
     return len(re.findall(rb"/Type\s*/Page(?!s)", Path(path).read_bytes()))
+
+
+CALIBRATION = Calibration(-4.0, 2.0, {
+    "model_id": "google/medgemma-1.5-4b-it", "precision": "4-bit NF4 weights, bfloat16 compute",
+    "prompt_fingerprint": "0123456789abcdef", "created": "2026-11-13", "prevalence": 0.0544,
+    "reference": {"n_images": 4376, "n_positive": 238, "n_patients": 1695},
+    "cross_validated": {
+        "review": {"sensitivity": [0.9, 0.86, 0.94], "specificity": [0.61, 0.58, 0.64],
+                   "flagged_share": 0.41},
+        "detected": {"sensitivity": [0.52, 0.45, 0.6], "specificity": [0.95, 0.94, 0.96],
+                     "flagged_share": 0.08},
+        "bands": {"detected": {"positive_share": [0.357, 0.277, 0.442], "image_share": 0.071},
+                  "review": {"positive_share": [0.074, 0.057, 0.093], "image_share": 0.314},
+                  "negative": {"positive_share": [0.009, 0.006, 0.013], "image_share": 0.614}}}})
+
+
+def decision_for(score, answer="No pneumothorax detected", calibration=CALIBRATION) -> dict:
+    """The decision dict exactly as the analyzer records it."""
+    decision = decide(score, calibration)
+    return {**decision.as_dict(), "prompt_fingerprint": "0123456789abcdef",
+            "text_answer": answer, "text_agrees": answer_agrees(answer, decision.band)}
 
 
 def make_response(impression="Indeterminate", raw="Uncertain <finding>", **extra):
@@ -175,31 +198,35 @@ class ReportGenerationTests(unittest.TestCase):
         self.assertNotIn("Clinical Decision Support", text)
 
     def test_full_reports_fit_on_two_pages_for_every_outcome(self):
-        cases = (("Pneumothorax Detected", "Pneumothorax detected", 2.4),
-                 ("No Pneumothorax Detected", "No pneumothorax detected", -2.3),
-                 ("Indeterminate", "Possible small apical pneumothorax", 0.4))
+        cases = ((DETECTED, "No pneumothorax detected", 2.4, CALIBRATION),
+                 (REVIEW, "No pneumothorax detected", -2.3, CALIBRATION),
+                 (NEGATIVE, "Pneumothorax detected", -7.5, CALIBRATION),
+                 (INDETERMINATE, "Possible small apical pneumothorax", 0.4, None))
         for size in ((900, 1100), (1400, 1000)):
-            for impression, finding, score in cases:
+            for impression, finding, score, calibration in cases:
                 with self.subTest(size=size, impression=impression):
                     image = Image.new("RGB", size, (90, 90, 90))
                     response = full_response(impression, ONE_SENTENCE.format(finding=finding),
-                                             score, image)
+                                             score, image,
+                                             decision=decision_for(score, None, calibration))
                     response.analysis_id = f"test-{size[0]}-{impression.split()[0].lower()}"
                     path = self.generator.generate_pdf_report(response, image,
                                                               signed_attribution(score))
                     self.assertEqual(page_count(path), 2)
 
-    def test_long_responses_are_shortened_on_page_one_and_kept_in_full(self):
+    def test_generated_text_is_kept_in_full_and_labelled_as_not_deciding(self):
         reasoning = "Long reasoning sentence number {}. "
         raw = "**Finding**: No pneumothorax detected\n**Brief Reasoning**: " + "".join(
             reasoning.format(index) for index in range(30))
         image = Image.new("RGB", (900, 1100), (90, 90, 90))
-        response = full_response("No Pneumothorax Detected", raw, -1.5, image)
+        response = full_response(REVIEW, raw, -1.5, image, decision=decision_for(-1.5))
         story = self.generator._story(response, image, signed_attribution(-1.5), 532)
         text = " ".join(paragraph_texts(story))
-        self.assertIn("Shortened here", text)
-        self.assertIn("Full model response", text)
+        self.assertIn("Generated text (not used for the outcome)", text)
+        self.assertIn("written to fit it", text)
         self.assertIn("number 29.", text)
+        panel = self.generator._finding_column(response, "#000000")
+        self.assertNotIn("number 0.", " ".join(paragraph_texts(panel)))
         path = self.generator.generate_pdf_report(response, image, signed_attribution(-1.5))
         self.assertLessEqual(page_count(path), 3)
 
@@ -221,49 +248,80 @@ class ReportContentTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.generator = UltimatePDFGenerator(directory.name)
 
-    def test_outcome_colour_follows_model_output(self):
+    def test_outcome_colour_follows_the_band(self):
+        self.assertEqual(outcome_tone(DETECTED), "danger")
+        self.assertEqual(outcome_tone(REVIEW), "warning")
+        self.assertEqual(outcome_tone(NEGATIVE), "success")
+        self.assertEqual(outcome_tone(INDETERMINATE), "neutral")
+        # Older, text-only outcomes keep their colours.
         self.assertEqual(outcome_tone("Pneumothorax Detected"), "danger")
         self.assertEqual(outcome_tone("No Pneumothorax Detected"), "success")
-        self.assertEqual(outcome_tone("Indeterminate"), "neutral")
 
-    def test_response_rows_skip_repeated_finding_and_strip_markdown(self):
-        response = make_response(
-            "No Pneumothorax Detected",
-            "**Finding**: No pneumothorax detected.\n**Brief Reasoning**: **Clear** lungs.")
-        self.assertEqual(self.generator._response_rows(response), [("Reasoning", "Clear lungs.")])
+    def _panel_text(self, response) -> str:
+        columns = (self.generator._finding_column(response, "#000000")
+                   + self.generator._score_column(response, 200))
+        return " ".join(paragraph_texts(columns))
 
-    def test_response_rows_keep_unexpected_wording_and_fall_back_to_raw_text(self):
-        response = make_response("Indeterminate", "**Finding**: Possible small pneumothorax")
-        self.assertEqual(self.generator._response_rows(response),
-                         [("Finding", "Possible small pneumothorax")])
-        self.assertEqual(self.generator._response_rows(make_response(raw="**free** text")),
-                         [("Response", "free text")])
+    def test_review_band_asks_for_review_and_reports_held_out_performance(self):
+        response = make_response(REVIEW, "**Finding**: No pneumothorax detected",
+                                 decision=decision_for(-1.5))
+        text = self._panel_text(response)
+        self.assertIn("Possible pneumothorax: review required", text)
+        self.assertIn("Have a radiologist review", text)
+        self.assertIn("7.4% (5.7%–9.3%) of images in this band had a pneumothorax, against 5.4% "
+                      "overall", text)
+        self.assertIn("Generated text answer: ‘No pneumothorax detected’", text)
+        self.assertIn("review band", text)
+        self.assertIn("4,376 radiologist-labelled", text)
+        self.assertIn("Review ≥ −4.00 90% (86%–94%) 39% (36%–42%)", text)
+        self.assertIn("Suspected ≥ +2.00 52% (45%–60%) 5% (4%–6%)", text)
+
+    def test_contradicting_text_is_flagged_and_negative_band_needs_no_targeted_review(self):
+        response = make_response(NEGATIVE, "**Finding**: Pneumothorax detected",
+                                 decision=decision_for(-7.0, "Pneumothorax detected"))
+        text = self._panel_text(response)
+        self.assertIn("contradicts this outcome", text)
+        self.assertNotIn("Have a radiologist review", text)
+
+    def test_uncalibrated_and_unscored_panels_explain_themselves(self):
+        uncalibrated = self._panel_text(make_response(decision=decision_for(3.0, None, None)))
+        self.assertIn("No calibration matches", uncalibrated)
+        self.assertIn("uncalibrated", uncalibrated)
+        unscored = self._panel_text(make_response(decision=decision_for(None, None)))
+        self.assertIn("Not available", unscored)
+        legacy = self._panel_text(make_response("No Pneumothorax Detected"))
+        self.assertIn("generated text alone", legacy)
 
     def test_detail_rows_describe_model_runtime_and_image(self):
         response = make_response(
             model_info={"model_id": "model/x", "precision": "4-bit NF4 weights, bfloat16 compute",
                         "device": "cuda (GPU)", "app_version": "abc123", "torch": "2.8.0",
                         "transformers": "5.20.1"},
-            timings={"generation_seconds": 2.5, "attribution_seconds": 0.75},
+            timings={"generation_seconds": 2.5, "scoring_seconds": 0.2,
+                     "attribution_seconds": 0.75},
             attribution={"status": "available", "method": "Gradient × activation",
                          "target": "logit difference", "target_score": 1.25},
+            decision=decision_for(1.25),
         )
         response.image_metadata.update({"dimensions": (640, 480), "format": "PNG", "size": 2048})
         rows = dict(self.generator._detail_rows(response))
         self.assertEqual(rows["Model"], "model/x")
         self.assertEqual(rows["Precision and device"],
                          "4-bit NF4 weights, bfloat16 compute on cuda (GPU)")
-        self.assertEqual(rows["Timing"], "generation 2.50 s · attribution 0.75 s")
+        self.assertEqual(rows["Timing"], "generation 2.50 s · scoring 0.20 s · attribution 0.75 s")
+        self.assertEqual(rows["Calibration"], "review −4.000 / suspected +2.000 · "
+                                              "prompt 0123456789abcdef · fitted 2026-11-13")
         self.assertEqual(rows["Image"], "<scan & input>.png · 640 × 480 px · PNG · 2 KB")
         self.assertIn("+1.250", rows["Attribution"])
         self.assertEqual(rows["Software"], "app abc123 · torch 2.8.0 · transformers 5.20.1")
-        self.assertEqual(rows["Generated"], "January 01, 2026, 00:00:00 UTC")
+        self.assertEqual(rows["Analysis"], "test-id · January 01, 2026, 00:00:00 UTC")
 
     def test_missing_details_are_marked_not_recorded(self):
         response = make_response()
         response.image_metadata = {}
         rows = dict(self.generator._detail_rows(response))
-        for key in ("Image", "Model", "Precision and device", "Timing", "Attribution", "Software"):
+        for key in ("Image", "Model", "Precision and device", "Timing", "Attribution", "Software",
+                    "Calibration"):
             with self.subTest(key=key):
                 self.assertEqual(rows[key], NOT_RECORDED)
         self.assertEqual(self.generator._image_check_rows(response),
@@ -287,20 +345,33 @@ class ReportContentTests(unittest.TestCase):
         self.assertIn("12.0% of pixels are pure white", flags[1])
         self.assertIn("spans only 60 of 255", flags[2])
 
-    def test_answer_preference_is_the_two_way_softmax(self):
-        self.assertEqual(answer_preference(0.0), 0.5)
-        self.assertAlmostEqual(answer_preference(-2.31), 0.0903, places=4)
-        self.assertAlmostEqual(answer_preference(2.31) + answer_preference(-2.31), 1.0)
-        self.assertEqual(answer_preference(1000.0), 1.0)
-        self.assertEqual(answer_preference(-1000.0), 0.0)
+    def test_decision_score_prefers_the_recorded_decision(self):
+        self.assertEqual(decision_score(make_response(decision={"score": -1.5},
+                                                      attribution={"target_score": 9.0})), -1.5)
+        self.assertEqual(decision_score(make_response(attribution={"target_score": 9.0})), 9.0)
+        self.assertIsNone(decision_score(make_response(decision={"score": float("nan")})))
 
-    def test_score_agreement_compares_direction_with_the_answer(self):
-        self.assertEqual(score_agreement("Pneumothorax Detected", 1.0)[0], "success")
-        self.assertEqual(score_agreement("Pneumothorax Detected", -1.0)[0], "danger")
-        self.assertEqual(score_agreement("No Pneumothorax Detected", -1.0)[0], "success")
-        self.assertEqual(score_agreement("No Pneumothorax Detected", 1.0)[0], "danger")
-        self.assertEqual(score_agreement("No Pneumothorax Detected", 0.0)[0], "neutral")
-        self.assertEqual(score_agreement("Indeterminate", 3.0)[0], "neutral")
+    def test_text_answer_note_only_warns_on_contradiction(self):
+        self.assertEqual(text_answer_note(decision_for(5.0, "No pneumothorax detected"))[0], "danger")
+        self.assertEqual(text_answer_note(decision_for(5.0, "Pneumothorax detected"))[0], "neutral")
+        self.assertEqual(text_answer_note(decision_for(-1.0, "No pneumothorax detected"))[0],
+                         "neutral")
+        self.assertIn("no definite answer", text_answer_note(decision_for(-9.0, None))[1])
+        self.assertIsNone(text_answer_note(decision_for(1.0, None, None)))
+
+    def test_band_evidence_needs_band_rates_and_prevalence(self):
+        self.assertIn("0.9% (0.6%–1.3%)", band_evidence(decision_for(-9.0)))
+        self.assertIn("36% (28%–44%)", band_evidence(decision_for(5.0)))
+        self.assertIsNone(band_evidence(decision_for(3.0, None, None)))
+        self.assertIsNone(band_evidence({"band": "review", "calibration": {"prevalence": 0.05}}))
+
+    def test_calibration_table_reports_both_bands_or_nothing(self):
+        caption, rows = calibration_table(decision_for(0.0))
+        self.assertIn("238 with pneumothorax", caption)
+        self.assertEqual(rows, [("Review ≥ −4.00", "90% (86%–94%)", "39% (36%–42%)"),
+                                ("Suspected ≥ +2.00", "52% (45%–60%)", "5% (4%–6%)")])
+        self.assertIsNone(calibration_table({"calibration": {"cross_validated": {
+            "review": {"sensitivity": [0.9, None, 0.95], "specificity": [0.6, 0.5, 0.7]}}}}))
 
     def test_region_headline_and_border_note_follow_the_summary(self):
         grid = np.zeros((16, 16))

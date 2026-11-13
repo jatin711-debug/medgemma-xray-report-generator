@@ -1,4 +1,5 @@
 """Chart flowables, colours and number formats shared by the PDF report."""
+import math
 from typing import Optional
 
 import numpy as np
@@ -6,7 +7,7 @@ from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.platypus import Flowable
 
-from src.core.heatmap import AGAINST_COLOR, TOWARD_COLOR, diverging_colors, overlay_colors
+from src.core.heatmap import AGAINST_COLOR, TOWARD_COLOR, overlay_colors
 
 GAUGE_LIMIT = 10.0
 
@@ -31,6 +32,7 @@ HEX = {
     "against": "#%02x%02x%02x" % AGAINST_COLOR,
     "success_text": "#166534",
     "danger_text": "#991B1B",
+    "danger_bar": "#DC2626",
 }
 PALETTE = {name: colors.HexColor(value) for name, value in HEX.items()}
 PALETTE["white"] = colors.white
@@ -67,41 +69,65 @@ class _Chart(Flowable):
         self.canv.setFillColorRGB(*(np.asarray(rgb, dtype=float) / 255.0))
 
 
+def gauge_limit(*values: Optional[float]) -> float:
+    """A symmetric even range that shows every threshold with room either side."""
+    finite = [abs(v) for v in values if v is not None and np.isfinite(v)]
+    needed = max(finite + [0.0]) + 2.0
+    return float(max(GAUGE_LIMIT, 2 * math.ceil(needed / 2)))
+
+
 class DecisionGauge(_Chart):
-    """Where the decision score falls between the two definite answers."""
+    """Where the decision score falls relative to the calibrated bands.
+
+    Without thresholds the track is plain gray: an uncalibrated score has no
+    meaningful cutoff, including zero.
+    """
 
     TRACK_Y, TRACK_H = 14.0, 6.0
+    BANDS = (("No flag", HEX["gray_300"]), ("Review", HEX["amber_500"]),
+             ("Suspected", HEX["danger_bar"]))
 
-    def __init__(self, score: float, width: float, fonts, limit: float = GAUGE_LIMIT):
+    def __init__(self, score: Optional[float], width: float, fonts,
+                 review: Optional[float] = None, detected: Optional[float] = None):
         super().__init__(width, 38, fonts)
-        self.score, self.limit = score, limit
+        self.score, self.review, self.detected = score, review, detected
+        self.limit = gauge_limit(review, detected)
 
     def _x(self, value: float) -> float:
         clamped = max(-self.limit, min(self.limit, value))
         return (clamped + self.limit) / (2 * self.limit) * self.width
 
+    def _segments(self) -> list[tuple[str, str, float, float]]:
+        if self.review is None or self.detected is None:
+            return [("", HEX["gray_200"], 0.0, self.width)]
+        edges = [0.0, self._x(self.review), self._x(self.detected), self.width]
+        return [(label, color, edges[i], edges[i + 1])
+                for i, (label, color) in enumerate(self.BANDS) if edges[i + 1] > edges[i]]
+
     def draw(self):
         canvas, width = self.canv, self.width
-        canvas.setFont(self.font, 7)
-        canvas.setFillColor(PALETTE["gray_600"])
-        canvas.drawString(0, 27, "← No pneumothorax")
-        canvas.drawRightString(width, 27, "Pneumothorax →")
-
+        segments = self._segments()
         canvas.saveState()
         path = canvas.beginPath()
         path.roundRect(0, self.TRACK_Y, width, self.TRACK_H, self.TRACK_H / 2)
         canvas.clipPath(path, stroke=0, fill=0)
-        steps = 72
-        step = width / steps
-        for index, rgb in enumerate(diverging_colors(np.linspace(-1, 1, steps))):
-            self._fill(rgb)
-            canvas.rect(index * step, self.TRACK_Y, step + 0.5, self.TRACK_H, stroke=0, fill=1)
+        for _, color, start, end in segments:
+            canvas.setFillColor(colors.HexColor(color))
+            canvas.rect(start, self.TRACK_Y, end - start, self.TRACK_H, stroke=0, fill=1)
         canvas.restoreState()
 
-        canvas.setStrokeColor(PALETTE["gray_500"])
-        canvas.setLineWidth(0.75)
-        centre = self._x(0)
-        canvas.line(centre, self.TRACK_Y - 2, centre, self.TRACK_Y + self.TRACK_H + 2)
+        canvas.setFont(self.font, 7)
+        canvas.setFillColor(PALETTE["gray_600"])
+        for label, _, start, end in segments:
+            if label and pdfmetrics.stringWidth(label, self.font, 7) + 4 < end - start:
+                canvas.drawCentredString((start + end) / 2, 27, label)
+        if len(segments) == 1:
+            canvas.drawString(0, 27, "Uncalibrated score: no cutoff applies")
+
+        canvas.setStrokeColor(PALETTE["white"])
+        canvas.setLineWidth(1.5)
+        for _, _, start, _ in segments[1:]:
+            canvas.line(start, self.TRACK_Y, start, self.TRACK_Y + self.TRACK_H)
 
         canvas.setFont(self.font, 6.5)
         canvas.setFillColor(PALETTE["gray_500"])
@@ -115,6 +141,8 @@ class DecisionGauge(_Chart):
             else:
                 canvas.drawCentredString(self._x(value), 3, label)
 
+        if self.score is None or not np.isfinite(self.score):
+            return
         x, y = self._x(self.score), self.TRACK_Y + self.TRACK_H / 2
         canvas.setFillColor(PALETTE["white"])
         canvas.circle(x, y, 5.5, stroke=0, fill=1)

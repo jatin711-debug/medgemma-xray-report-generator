@@ -29,13 +29,15 @@ class AnalysisTests(unittest.TestCase):
         with patch.dict('os.environ', {'MEDGEMMA_QUANTIZE': '0'}), \
              patch('src.core.medical_analyzer.torch.cuda.is_available', return_value=True), \
              patch.object(analyzer, 'get_system_memory_info', return_value='test'), \
-             patch('src.core.medical_analyzer.AutoProcessor.from_pretrained'), \
+             patch('src.core.medical_analyzer.AutoProcessor.from_pretrained'),              patch('src.core.medical_analyzer.AutoImageProcessor.from_pretrained') as image_processor, \
              patch('src.core.medical_analyzer.AutoModelForImageTextToText.from_pretrained') as load, \
              patch('src.core.medical_analyzer.BitsAndBytesConfig') as quantization:
             asyncio.run(analyzer.load_model())
         self.assertTrue(analyzer.model_loaded)
         self.assertIsNone(load.call_args.kwargs['quantization_config'])
         quantization.assert_not_called()
+        # Calibration depends on identical preprocessing whether or not torchvision is installed.
+        self.assertEqual(image_processor.call_args.kwargs, {'backend': 'pil'})
 
     def test_inference_is_serialized_and_does_not_block_event_loop(self):
         analyzer = MedicalImageAnalyzer()

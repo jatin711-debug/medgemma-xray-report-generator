@@ -46,7 +46,9 @@ class RadiologyFindings(BaseModel):
     abnormalities: list[str] = Field(description="Detected abnormalities or pathologies")
     impression: str = Field(description="Overall clinical impression")
     recommendations: list[str] = Field(description="Clinical recommendations")
-    confidence_level: str = Field(description="Uncalibrated confidence; unavailable")
+    confidence_level: str = Field(description="How the outcome was calibrated, or why it was not")
+    model_text_answer: Optional[str] = Field(default=None,
+        description="The generated text's own answer; informational, it does not set the outcome")
 
 
 class AnalysisResponse(BaseModel):
@@ -61,6 +63,8 @@ class AnalysisResponse(BaseModel):
         description="Wall-clock seconds for generation and attribution")
     attribution: Dict[str, Any] = Field(default_factory=dict,
         description="Attribution map status, method and uncalibrated target score")
+    decision: Dict[str, Any] = Field(default_factory=dict,
+        description="Decision score, calibrated band, thresholds and their provenance")
 
 
 class PDFGenerationResponse(BaseModel):

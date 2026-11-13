@@ -23,6 +23,10 @@ class ModelSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.analysis_id)
         self.assertGreater(image.width, 0)
         self.assertIn('generation_seconds', result.timings)
+        # A shipped calibration must match the default model, prompt and the precision in use.
+        self.assertIn(result.decision.get('band'), {'detected', 'review', 'negative'},
+                      result.decision.get('reason'))
+        self.assertEqual(result.findings.impression, result.decision['outcome'])
         self.assertIn(result.attribution.get('status'), {'available', 'unavailable', 'disabled'})
         if attribution is not None:
             side = attribution.grid.shape[0]

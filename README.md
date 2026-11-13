@@ -8,13 +8,13 @@
 A FastAPI service that sends a chest X-ray image to [MedGemma 1.5 4B](https://huggingface.co/google/medgemma-1.5-4b-it) and renders the model's pneumothorax assessment as a PDF report.
 
 > [!WARNING]
-> **Research and educational prototype only.** This project is unvalidated and is not a medical device. Do not use it for diagnosis, clinical decisions, or patient care. Model outputs can be wrong or indeterminate, and confidence scores are not calibrated. Use synthetic or appropriately authorized, non-sensitive images only.
+> **Research and educational prototype only.** This project is not clinically validated and is not a medical device. Do not use it for diagnosis, clinical decisions, or patient care. The outcome thresholds were calibrated on one public data set; on it, about 1 in 10 pneumothoraces still scored below the review threshold. Use synthetic or appropriately authorized, non-sensitive images only.
 
 ## Features
 
 - **Single-image analysis** of JPEG, PNG, TIFF, BMP or WebP chest X-rays (DICOM is not supported).
-- **Strict output parsing:** responses that don't match the requested finding format are marked *indeterminate* rather than guessed.
-- **Two-page PDF reports** with a colour-coded result, the model's reasoning, a decision-score gauge, attribution maps, a regional breakdown, an input-image check and model/runtime provenance. Reports are published atomically, so a failed build never leaves a partial file.
+- **Calibrated outcome bands:** the result comes from MedGemma's decision score, placed in a *suspected*, *review* or *no flag* band using thresholds fitted on 4,376 radiologist-labelled X-rays, separately for each precision (see [How the outcome is decided](docs/calibration.md)). The model's written answer is recorded but no longer decides the result.
+- **Two-page PDF reports** with a colour-coded outcome, the decision score against its bands, held-out performance figures, attribution maps, a regional breakdown, an input-image check and model/runtime provenance. Reports are published atomically, so a failed build never leaves a partial file.
 - **Signed attribution maps** showing which image regions pushed the model toward "pneumothorax detected" (red) and toward "no pneumothorax detected" (blue) (see [The report](#the-report)).
 - **Role-based API keys** (reader / operator / admin) that fail closed when configuration is missing or weak.
 - **Input safeguards:** 10 MiB / 25-megapixel image limits, a request-body cap, and one inference at a time per process.
@@ -76,16 +76,17 @@ Roles are shared service credentials, not user accounts: all keys see the same r
 
 ## The report
 
-Page 1 is the summary: result, decision score, attribution map and limitations. Page 2 holds the regional breakdown, the input-image check, technical details and the method. A model response far longer than the requested one sentence is shortened on page 1 and printed in full later, which can add a third page.
+Page 1 is the summary: outcome, decision score, attribution map and limitations. Page 2 holds the regional breakdown, the input-image check, technical details and the method. A model response far longer than the requested one sentence can add a third page.
 
-- **Result panel:** the parsed model output (red: pneumothorax detected, green: none detected, gray: indeterminate) and the model's reasoning with Markdown removed. If the model's wording differs from the parsed result, both are shown.
-- **Decision score:** the raw logit difference between the first tokens of "Pneumothorax detected" and "No pneumothorax detected" (positive favours pneumothorax), drawn on a −10 to +10 gauge. The panel says whether the score points the same way as the generated answer, and gives the model's preference between those two tokens (the softmax over just the two). Both are uncalibrated: they describe the model, not the probability of disease.
+- **Outcome:** *pneumothorax suspected* (red), *possible pneumothorax: review required* (amber), *no pneumothorax flagged* (green) or *indeterminate* (gray), with how often reference images in the same band had a pneumothorax. The suspected and review bands also ask for radiologist review. The model's written answer is shown beside it and flagged if it contradicts the outcome.
+- **Decision score:** the logit difference between the first tokens of "Pneumothorax detected" and "No pneumothorax detected", drawn against the calibrated bands, with a table of how many pneumothoraces and other images each threshold flagged in held-out reference data.
 - **Attribution map:** the input image next to a signed overlay. The map is gradient × activation on the 256 image tokens MedGemma's language model receives (a 16 × 16 grid), targeting the decision score. Red regions raised "pneumothorax detected", blue regions raised "no pneumothorax detected", and colour strength is relative to the strongest token in that image. It is **not** a lesion outline or a validated localization.
 - **Attribution by region:** the unsmoothed token grid next to back-to-back bars giving each region's share of the total attribution in each direction. Regions are thirds and halves of the image frame, not anatomical zones. Summary tiles show the share in each direction, how concentrated the evidence is (share held by the strongest 10% of tokens) and how much sits in the outer ring of tokens, where labels and markers usually are. A note appears if that ring holds a disproportionate share.
 - **Input image check:** an intensity histogram with the 1st–99th percentile range shaded, plus grayscale, mean intensity, contrast and pure black/white pixel shares. Colour images, more than 5% pure white pixels and a narrow intensity range are flagged. These describe the file only; they are not a diagnostic quality assessment.
-- **Technical details:** analysis ID and time, image source and size, model ID, precision and device, generation and attribution time, and the app commit plus torch/transformers versions.
+- **Technical details:** analysis ID and time, image source and size, model ID, precision and device, generation, scoring and attribution time, the calibration used (thresholds, prompt fingerprint, fit date), and the app commit plus torch/transformers versions.
+- **Method:** how the score and the map are computed, and the model's generated answer and reasoning, labelled as not used for the outcome. The reasoning is written after the answer and fitted to it, so it is not evidence.
 
-The attribution map needs one extra forward and backward pass. Set `MEDGEMMA_ATTRIBUTION=0` to skip it, for example on low-memory GPUs; the report then shows the input image alone, without the score or the regional breakdown. If the map fails (for example, out of memory), the analysis still succeeds and the report says the map is unavailable.
+The attribution map needs one extra forward and backward pass. Set `MEDGEMMA_ATTRIBUTION=0` to skip it, for example on low-memory GPUs; the report then shows the input image alone and no regional breakdown. The decision score and outcome do not depend on it. If the map fails (for example, out of memory), the analysis still succeeds and the report says the map is unavailable.
 
 ## Configuration
 
@@ -94,8 +95,9 @@ All settings are read from the environment or `.env`; [`samplenv`](samplenv) doc
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `API_KEY_ADMIN` | **required** | Admin key (≥ 32 chars, unique). `API_KEY_OPERATOR` / `API_KEY_READER` are optional. Each can be read from a file via `API_KEY_<ROLE>_FILE`. |
-| `MODEL_ID` | `google/medgemma-1.5-4b-it` | Hugging Face model to load |
-| `MEDGEMMA_QUANTIZE` | `auto` | `auto` = 4-bit on CUDA and full precision on CPU; `1` / `0` force it on or off |
+| `MODEL_ID` | `google/medgemma-1.5-4b-it` | Hugging Face model to load. Other models have no calibration, so their outcomes are *indeterminate*. |
+| `MEDGEMMA_QUANTIZE` | `auto` | `auto` = 4-bit on CUDA and full precision on CPU; `1` / `0` force it on or off. Each precision uses its own calibrated thresholds. |
+| `MEDGEMMA_CALIBRATION` | `src/core/calibration.json` | Alternative calibration file |
 | `MEDGEMMA_ATTRIBUTION` | `1` | Add the attribution heatmap to reports; `0` disables it |
 | `APP_VERSION` | git commit | Build identifier printed in reports (containers exclude `.git`, so pass it as a build arg) |
 | `ENABLE_API_DOCS` | `false` | Expose `/docs` and `/openapi.json` |
@@ -123,19 +125,22 @@ Opt-in tests against local MySQL and S3-compatible storage (`RUN_STORAGE_INTEGRA
 main.py                 ASGI entry point (uvicorn main:app)
 app.py                  CLI launcher
 src/api/                FastAPI app, schemas, API-key auth, request limits
-src/core/               MedGemma analyzer, findings parser, attribution, map summaries and rendering, image statistics
+src/core/               MedGemma analyzer, prompt, calibrated decision bands, findings, attribution, map summaries and rendering, image statistics
 src/services/           Image upload and URL validation
 src/reports/            PDF layout, chart drawing and atomic report storage
 db.py, aws_utils.py     Optional MySQL and S3 integration
 tests/                  Unit, API and opt-in integration tests
+tools/                  Modal jobs for calibration and real-model checks, and the calibration analysis
+docs/calibration.md     How the outcome is decided, evaluation results, re-running the calibration
 docs/deployment.md      Access control, containers, integration tests, dependency updates
 ```
 
 ## Limitations
 
-- The model, prompt, parser and full application have **not been clinically evaluated**.
+- The application has **not been clinically evaluated**. The decision thresholds were fitted and checked on one public data set (NIH ChestX-ray14 with radiologist-adjudicated labels); results elsewhere may differ, and about 1 in 10 pneumothoraces in that set scored below the review threshold. See [docs/calibration.md](docs/calibration.md).
+- Changing the model, prompt or numeric precision invalidates the calibration until it is re-run.
 - Only pneumothorax is assessed; MedGemma's broader capabilities aren't used.
-- The attribution map explains one uncalibrated model score. Gradient-based maps can be noisy and have not been checked against radiologist annotations, so they show what influenced the model, not where a lesion is.
+- The attribution map explains the model's decision score. Gradient-based maps can be noisy and have not been checked against radiologist annotations, so they show what influenced the model, not where a lesion is.
 - The S3 and MySQL steps aren't transactional, so a database failure after an upload can leave an unreferenced S3 object.
 - There's no distributed rate limiting, per-user isolation or audit trail. Keep the service on a trusted network behind a TLS proxy.
 

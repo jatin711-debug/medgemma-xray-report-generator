@@ -22,7 +22,8 @@ from reportlab.platypus import (
     Spacer, Table, TableStyle,
 )
 
-from src.core.findings import clean_markdown, split_response
+from src.core.decision import DETECTED, NEGATIVE, REVIEW
+from src.core.findings import clean_markdown
 from src.core.heatmap import (
     AttributionMap, EvidenceSummary, render_overlay, render_token_grid, summarize_evidence,
 )
@@ -47,18 +48,27 @@ NARROW_RANGE_LEVELS = 100
 OUTCOME_TONES = {
     "danger": (colors.HexColor("#FEF2F2"), colors.HexColor("#DC2626"), colors.HexColor("#991B1B")),
     "success": (colors.HexColor("#F0FDF4"), colors.HexColor("#16A34A"), colors.HexColor("#166534")),
+    "warning": (colors.HexColor("#FFFBEB"), colors.HexColor("#F59E0B"), colors.HexColor("#92400E")),
     "neutral": (colors.HexColor("#F3F4F6"), colors.HexColor("#6B7280"), colors.HexColor("#374151")),
 }
-_OUTCOMES = {"pneumothorax detected": "danger", "no pneumothorax detected": "success"}
+_OUTCOMES = {DETECTED.lower(): "danger", REVIEW.lower(): "warning", NEGATIVE.lower(): "success",
+             # Reports built from the generated text alone (no decision score).
+             "pneumothorax detected": "danger", "no pneumothorax detected": "success"}
+BAND_NAMES = {"detected": "suspected band", "review": "review band", "negative": "no-flag band"}
 
 POSITIVE_LABEL = "‘Pneumothorax detected’"
 NEGATIVE_LABEL = "‘No pneumothorax detected’"
 LIMITATIONS = (
     "<b>Experimental research output.</b> Not validated for diagnosis, clinical decisions, or "
-    "patient care. The model can be wrong or indeterminate, and no calibrated confidence is "
-    "available. Attribution shows which image regions influenced one model score; it is not a "
-    "segmentation, a lesion outline or a validated localization. Do not use real patient data "
-    "without appropriate authorization and safeguards."
+    "patient care. The outcome bands were calibrated on one public, radiologist-labelled data set; "
+    "performance on other hospitals, devices, views or populations may differ, and a score below "
+    "the review threshold does not rule out pneumothorax. Attribution shows which image regions "
+    "influenced one model score; it is not a segmentation, a lesion outline or a validated "
+    "localization. Do not use real patient data without appropriate authorization and safeguards."
+)
+GENERATED_TEXT_NOTE = (
+    "The answer comes first and the reasoning is written to fit it; the reasoning is not "
+    "evidence and was not checked against the image."
 )
 
 
@@ -72,14 +82,6 @@ def outcome_tone(impression: str) -> str:
 def _sentence_case(text: str) -> str:
     text = text.strip()
     return text[:1].upper() + text[1:].lower() if text else text
-
-
-def _preview(text: str, limit: int) -> tuple[str, bool]:
-    """Shorten ``text`` at a word boundary; report whether anything was cut."""
-    if len(text) <= limit:
-        return text, False
-    cut = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:.")
-    return cut + "…", True
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -106,32 +108,81 @@ def _format_timestamp(value: str, compact: bool = False) -> str:
     return parsed.strftime("%d %b %Y, %H:%M UTC" if compact else "%B %d, %Y, %H:%M:%S UTC")
 
 
-def answer_preference(score: float) -> float:
-    """Share of the two answers' first-token probability that goes to 'Pneumothorax'.
-
-    This is the model's own softmax restricted to the two diverging tokens. It is
-    not calibrated against ground truth and is not a probability of disease.
-    """
-    if score >= 0:
-        return 1.0 / (1.0 + math.exp(-score))
-    odds = math.exp(score)
-    return odds / (1.0 + odds)
+def _number(value) -> Optional[float]:
+    return float(value) if isinstance(value, (int, float)) and math.isfinite(value) else None
 
 
-def score_agreement(impression: str, score: float) -> tuple[str, str]:
-    """Compare the decision score's direction with the generated answer.
+def decision_score(response) -> Optional[float]:
+    """The score the outcome was decided on, falling back to the attribution's target score."""
+    score = _number((response.decision or {}).get("score"))
+    if score is None:
+        score = _number((response.attribution or {}).get("target_score"))
+    return score
 
-    Returns a tone ('success', 'danger' or 'neutral') and a sentence for the report.
-    """
-    tone = outcome_tone(impression)
-    if tone == "neutral":
-        return "neutral", "Answer not definite; the score compares the two definite answers."
-    if score == 0:
-        return "neutral", "No preference between the two definite answers."
-    agrees = score > 0 if tone == "danger" else score < 0
-    if agrees:
-        return "success", "✓ Same direction as the generated answer."
-    return "danger", "▲ Points away from the generated answer; treat with extra caution."
+
+def text_answer_note(decision: dict) -> Optional[tuple[str, str]]:
+    """A tone and sentence relating the generated answer to the calibrated outcome."""
+    band = decision.get("band")
+    if band not in BAND_NAMES:
+        return None
+    answer = decision.get("text_answer")
+    if answer is None:
+        return "neutral", "The generated text gave no definite answer; it does not set the outcome."
+    if decision.get("text_agrees") is False:
+        return "danger", (f"▲ The generated text said ‘{answer}’, which contradicts this outcome. "
+                          "The outcome follows the calibrated score, not the text.")
+    return "neutral", f"Generated text answer: ‘{answer}’ (informational; it does not set the outcome)."
+
+
+def _interval(values, flip: bool = False) -> Optional[str]:
+    """'90% (86–94%)' from [estimate, low, high]; flip reports 1 − value (rate of the complement)."""
+    if not (isinstance(values, list) and len(values) == 3
+            and all(isinstance(v, (int, float)) for v in values)):
+        return None
+    estimate, low, high = (1 - values[0], 1 - values[2], 1 - values[1]) if flip else values
+    return f"{format_percent(estimate)} ({format_percent(low)}–{format_percent(high)})"
+
+
+def _rate(value: float) -> str:
+    """A share as a percentage, with one decimal below 10% so small rates stay distinct."""
+    return f"{value * 100:.1f}%" if value < 0.095 else format_percent(value)
+
+
+def band_evidence(decision: dict) -> Optional[str]:
+    """How often images in this image's band had a pneumothorax in the reference data."""
+    calibration = decision.get("calibration") or {}
+    bands = (calibration.get("cross_validated") or {}).get("bands") or {}
+    share = (bands.get(decision.get("band")) or {}).get("positive_share")
+    prevalence = _number(calibration.get("prevalence"))
+    if (prevalence is None or not isinstance(share, list) or len(share) != 3
+            or not all(isinstance(v, (int, float)) for v in share)):
+        return None
+    return (f"In the reference data, {_rate(share[0])} ({_rate(share[1])}–{_rate(share[2])}) of "
+            f"images in this band had a pneumothorax, against {_rate(prevalence)} overall.")
+
+
+def calibration_table(decision: dict) -> Optional[tuple[str, list[tuple[str, str, str]]]]:
+    """Caption and rows (threshold, pneumothoraces flagged, other images flagged), held out."""
+    calibration = decision.get("calibration") or {}
+    validated = calibration.get("cross_validated") or {}
+    rows = []
+    for name, key, threshold in (("Review", "review", decision.get("review_threshold")),
+                                 ("Suspected", "detected", decision.get("detected_threshold"))):
+        result = validated.get(key) or {}
+        threshold = _number(threshold)
+        label = name if threshold is None else f"{name} ≥ {format_signed(threshold)}"
+        flagged = _interval(result.get("sensitivity"))
+        others = _interval(result.get("specificity"), flip=True)
+        if flagged and others:
+            rows.append((label, flagged, others))
+    if len(rows) != 2:
+        return None
+    reference = calibration.get("reference") or {}
+    caption = "Share flagged, held out, with 95% CI"
+    if reference.get("n_images"):
+        caption += (f"; {reference['n_images']:,} radiologist-labelled NIH images, "
+                    f"{reference.get('n_positive', '?')} with pneumothorax")
+    return caption + ".", rows
 
 
 def region_headline(summary: EvidenceSummary) -> str:
@@ -241,7 +292,7 @@ class UltimatePDFGenerator:
             "subtitle": style("Subtitle", body, 9.5, 13, c["gray_600"], spaceBefore=2,
                               spaceAfter=10),
             "section": style("Section", self.font_display, 11.5, 14, c["primary"],
-                             spaceBefore=10),
+                             spaceBefore=8),
             "intro": style("Intro", body, 8.5, 11.5, c["gray_600"], spaceAfter=6),
             "label": style("Label", bold, 7, 9, c["gray_500"]),
             "meta_value": style("MetaValue", bold, 9.5, 12, c["gray_800"]),
@@ -309,7 +360,7 @@ class UltimatePDFGenerator:
         """Keep a heading, its rule and its content on the same page."""
         items = [Paragraph(escape(title), self.styles["section"]),
                  HRFlowable(width="100%", thickness=0.6, color=self.colors["gray_200"],
-                            spaceBefore=3, spaceAfter=5)]
+                            spaceBefore=3, spaceAfter=4)]
         if intro:
             items.append(Paragraph(intro, self.styles["intro"]))
         return KeepTogether(items + flowables)
@@ -386,87 +437,87 @@ class UltimatePDFGenerator:
         ]))
         return table
 
-    def _response_rows(self, response) -> list[tuple[str, str]]:
-        sections = split_response(response.raw_response)
-        finding = sections["finding"]
-        # The banner already shows the parsed result; repeat the model's wording only if it differs.
-        if finding and finding.lower().rstrip(". ") == response.findings.impression.lower():
-            finding = None
-        rows = [(label, value) for label, value in (("Finding", finding),
-                                                    ("Reasoning", sections["reasoning"])) if value]
-        if not rows:
-            rows = [("Response", clean_markdown(response.raw_response) or "No text returned")]
-        return rows
-
-    def _response_is_long(self, response) -> bool:
-        return any(len(value) > REASONING_PREVIEW_CHARS
-                   for _, value in self._response_rows(response))
+    def _generated_text(self, response) -> str:
+        return clean_markdown(response.raw_response) or "No text returned"
 
     def _finding_column(self, response, text_color) -> list:
         outcome_style = ParagraphStyle("OutcomeTone", parent=self.styles["outcome"],
                                        textColor=text_color)
-        items = [self._label("Model finding"), Spacer(1, 4),
+        decision = response.decision or {}
+        calibrated = decision.get("band") in BAND_NAMES
+        items = [self._label("Outcome · calibrated score" if calibrated else "Outcome"),
+                 Spacer(1, 4),
                  Paragraph(escape(_sentence_case(response.findings.impression)), outcome_style),
                  Spacer(1, 7)]
-        rows = self._response_rows(response)
-        prefixes = {"Finding": "Model wording", "Response": "Model response"}
-        if len(rows) > 1:
-            prefixes["Reasoning"] = "Reasoning"
-        for label, value in rows:
-            text, _ = _preview(value, REASONING_PREVIEW_CHARS)
-            prefix = prefixes.get(label)
-            markup = escape(text) if prefix is None else f"<b>{prefix}:</b> {escape(text)}"
-            items.append(Paragraph(markup, self.styles["body"]))
-        if self._response_is_long(response):
-            items.append(Paragraph("Shortened here; see ‘Full model response’ later in this "
-                                   "report.", self.styles["note"]))
+        if decision.get("reason"):
+            items.append(Paragraph(escape(decision["reason"]), self.styles["body"]))
+        evidence = band_evidence(decision)
+        if evidence:
+            items.append(Paragraph(escape(evidence), self.styles["body_small"]))
+        elif not decision:
+            items.append(Paragraph("Taken from the generated text alone; no calibrated decision "
+                                   "score was recorded for this analysis.", self.styles["body"]))
+        if decision.get("band") in {"detected", "review"}:
+            items.append(Paragraph("<b>Have a radiologist review this image for pneumothorax.</b>",
+                                   self.styles["body"]))
+        note = text_answer_note(decision)
+        if note:
+            tone, sentence = note
+            color = HEX["danger_text"] if tone == "danger" else HEX["gray_600"]
+            items += [Spacer(1, 3), Paragraph(f"<font color='{color}'>{escape(sentence)}</font>",
+                                              self.styles["body_small"])]
         return items
 
-    def _score_column(self, response, attribution: Optional[AttributionMap], width: float) -> list:
+    def _score_column(self, response, width: float) -> list:
+        decision = response.decision or {}
         items = [self._label("Decision score · logit difference"), Spacer(1, 3)]
-        if attribution is None:
-            status = (response.attribution or {}).get("status")
-            reason = {
-                "disabled": "Attribution is disabled on this server (MEDGEMMA_ATTRIBUTION=0).",
-                "unavailable": "The attribution pass failed for this analysis.",
-            }.get(status, "No attribution pass was recorded for this analysis.")
+        score = decision_score(response)
+        if score is None:
+            reason = decision.get("reason") or "No decision score was recorded for this analysis."
             return items + [Paragraph("Not available", self.styles["score"]),
-                            Paragraph(escape(reason), self.styles["note"]),
-                            Spacer(1, 8), self._label("Confidence"), Spacer(1, 2),
-                            Paragraph("Not available (uncalibrated)", self.styles["body_small"])]
-
-        score = attribution.target_score
-        leaning = ("favours pneumothorax" if score > 0 else
-                   "favours no pneumothorax" if score < 0 else "no preference")
+                            Paragraph(escape(reason), self.styles["note"])]
+        review = _number(decision.get("review_threshold"))
+        detected = _number(decision.get("detected_threshold"))
         gray = HEX["gray_500"]
+        band = BAND_NAMES.get(decision.get("band"), "uncalibrated")
         items += [
             Paragraph(f"{format_signed(score)}"
                       f"<font name='{self.font_body}' size='8.5' color='{gray}'>"
-                      f"&nbsp;&nbsp;{escape(leaning)}</font>",
-                      self.styles["score"]),
+                      f"&nbsp;&nbsp;{escape(band)}</font>", self.styles["score"]),
             Spacer(1, 5),
-            DecisionGauge(score, width, self.fonts),
+            DecisionGauge(score, width, self.fonts, review, detected),
             Spacer(1, 4),
         ]
-        tone, sentence = score_agreement(response.findings.impression, score)
-        tone_color = {"success": HEX["success_text"], "danger": HEX["danger_text"]}.get(
-            tone, HEX["gray_600"])
-        items.append(Paragraph(f"<font color='{tone_color}'>{escape(sentence)}</font>",
-                               self.styles["body_small"]))
-        preference = answer_preference(score)
-        items.append(Paragraph(
-            f"Token preference: pneumothorax {format_percent(preference)}, no pneumothorax "
-            f"{format_percent(1 - preference)} (uncalibrated; not the probability of disease).",
-            self.styles["note"]))
+        if review is None or detected is None:
+            reason = decision.get("reason") or "No calibration was recorded, so the score cannot be interpreted."
+            return items + [Paragraph(escape(reason), self.styles["body_small"])]
+        table = calibration_table(decision)
+        if table is not None:
+            caption, rows = table
+            cell, head = self.styles["tile_sub"], self.styles["label"]
+            data = [[Paragraph("SCORE", head), Paragraph("PNEUMOTHORAX", head),
+                     Paragraph("NO PNEUMOTHORAX", head)]]
+            data += [[Paragraph(escape(label), self.styles["cell_label"]),
+                      Paragraph(escape(flagged), cell), Paragraph(escape(others), cell)]
+                     for label, flagged, others in rows]
+            grid = Table(data, colWidths=[width * 0.34, width * 0.33, width * 0.33])
+            grid.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LINEBELOW", (0, 0), (-1, -2), 0.5, self.colors["gray_200"]),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]))
+            items += [Spacer(1, 2), grid,
+                      Paragraph(escape(caption), self.styles["note"])]
         return items
 
-    def _result_panel(self, response, attribution: Optional[AttributionMap], width: float) -> Table:
+    def _result_panel(self, response, width: float) -> Table:
         background, accent, text_color = OUTCOME_TONES[outcome_tone(response.findings.impression)]
         left_width = width * 0.53
         padding = 14
         right_width = width - left_width
         table = Table([[self._finding_column(response, text_color),
-                        self._score_column(response, attribution, right_width - 2 * padding)]],
+                        self._score_column(response, right_width - 2 * padding)]],
                       colWidths=[left_width, right_width])
         table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (0, 0), background),
@@ -481,14 +532,19 @@ class UltimatePDFGenerator:
         ]))
         return table
 
-    def _figure(self, image: Image.Image, attribution: Optional[AttributionMap],
+    def _figure(self, response, image: Image.Image, attribution: Optional[AttributionMap],
                 width: float) -> list:
-        max_height = 236
+        max_height = 220
         if attribution is None:
-            # The decision-score panel already says why there is no map.
             single = Table([[self._fit_image(image, width * 0.55, max_height)]], colWidths=[width])
             single.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER")]))
-            return [single]
+            status = (response.attribution or {}).get("status")
+            reason = {
+                "disabled": "No attribution map: attribution is disabled on this server "
+                            "(MEDGEMMA_ATTRIBUTION=0).",
+                "unavailable": "No attribution map: the attribution pass failed for this analysis.",
+            }.get(status, "No attribution map was recorded for this analysis.")
+            return [single, Paragraph(escape(reason), self.styles["note"])]
 
         gap = 16
         panel = (width - gap) / 2
@@ -536,7 +592,7 @@ class UltimatePDFGenerator:
 
     def _region_section(self, image: Image.Image, attribution: AttributionMap,
                         summary: EvidenceSummary, width: float) -> list:
-        map_width, map_height, caption_height = 142, 164, 13
+        map_width, map_height, caption_height = 120, 136, 13
         token_image = self._fit_image(render_token_grid(image, attribution.grid),
                                       map_width, map_height)
         column = map_width + 18
@@ -592,7 +648,7 @@ class UltimatePDFGenerator:
         check = (response.image_metadata or {}).get("image_check")
         check = check if isinstance(check, dict) else {}
         histogram_width = width * 0.48
-        histogram = IntensityHistogram(intensity_histogram(image), histogram_width - 14, 66,
+        histogram = IntensityHistogram(intensity_histogram(image), histogram_width - 14, 58,
                                        self.fonts, check.get("intensity_p1"),
                                        check.get("intensity_p99"))
         table_width = width - histogram_width
@@ -629,14 +685,29 @@ class UltimatePDFGenerator:
         timing_parts = []
         if "generation_seconds" in timings:
             timing_parts.append(f"generation {timings['generation_seconds']:.2f} s")
+        if "scoring_seconds" in timings:
+            timing_parts.append(f"scoring {timings['scoring_seconds']:.2f} s")
         if "attribution_seconds" in timings:
             timing_parts.append(f"attribution {timings['attribution_seconds']:.2f} s")
 
+        decision = response.decision or {}
+        review = _number(decision.get("review_threshold"))
+        detected = _number(decision.get("detected_threshold"))
+        calibration = decision.get("calibration") or {}
+        if calibration and review is not None and detected is not None:
+            calibration_text = " · ".join(part for part in (
+                f"review {format_signed(review, 3)} / suspected {format_signed(detected, 3)}",
+                f"prompt {calibration.get('prompt_fingerprint')}",
+                f"fitted {calibration.get('created')}" if calibration.get("created") else None)
+                if part)
+        else:
+            calibration_text = "None matched this configuration" if decision else NOT_RECORDED
+
         status = attribution.get("status")
         if status == "available":
-            score = format_signed(attribution.get("target_score", 0), 3)
+            target = format_signed(attribution.get("target_score", 0), 3)
             attribution_text = (f"{attribution.get('method', 'Gradient × activation')} · "
-                                f"target score {score} (uncalibrated)")
+                                f"target score {target}")
         elif status == "disabled":
             attribution_text = "Disabled"
         elif status == "unavailable":
@@ -649,13 +720,13 @@ class UltimatePDFGenerator:
                            ("transformers", "transformers")) if info.get(key)]
 
         return [
-            ("Analysis ID", response.analysis_id),
-            ("Generated", _format_timestamp(response.timestamp)),
+            ("Analysis", f"{response.analysis_id} · {_format_timestamp(response.timestamp)}"),
             ("Image", " · ".join(image_parts) or NOT_RECORDED),
             ("Timing", " · ".join(timing_parts) or NOT_RECORDED),
             ("Model", info.get("model_id") or NOT_RECORDED),
             ("Precision and device", runtime or NOT_RECORDED),
             ("Software", " · ".join(software_parts) or NOT_RECORDED),
+            ("Calibration", calibration_text),
             ("Attribution", attribution_text),
         ]
 
@@ -677,19 +748,27 @@ class UltimatePDFGenerator:
         table = Table(data, colWidths=[label_width, column - label_width,
                                        label_width, column - label_width])
         table.setStyle(self._grid_style([("LINEBEFORE", (2, 0), (2, -1), 0.5,
-                                          self.colors["gray_200"])]))
+                                          self.colors["gray_200"])], padding=2.5))
         return table
 
-    def _method(self, attribution: AttributionMap) -> Paragraph:
-        rows, columns = attribution.grid.shape
-        return Paragraph(
-            f"Gradient × activation on the {rows * columns} image tokens ({rows} × {columns}) "
-            f"that MedGemma's language model receives, taken at the token where "
-            f"{POSITIVE_LABEL} and {NEGATIVE_LABEL} first differ. The decision score is the "
-            "logit difference between those two tokens; positive favours pneumothorax. Regions "
-            "are thirds and halves of the image frame, not anatomical zones. Image left is "
-            "usually the patient's right on a PA view, but orientation is not checked.",
-            self.styles["cell"])
+    def _generated_text_items(self, response) -> list:
+        text = escape(self._generated_text(response)).replace("\n", " · ")
+        return [Spacer(1, 2),
+                Paragraph(f"<b>Generated text (not used for the outcome).</b> "
+                          f"{escape(GENERATED_TEXT_NOTE)} <i>“{text}”</i>", self.styles["cell"])]
+
+    def _method(self, attribution: Optional[AttributionMap]) -> list:
+        items = [Paragraph(
+            "<b>Decision.</b> Answer-token logit difference; thresholds target 90% sensitivity "
+            "(review) and 95% specificity (suspected).",
+            self.styles["cell"])]
+        if attribution is not None:
+            rows, columns = attribution.grid.shape
+            items += [Spacer(1, 2), Paragraph(
+                f"<b>Attribution.</b> Gradient × activation on the {rows} × {columns} image tokens "
+                "for the same score. Regions are frame thirds and halves, not anatomical zones; "
+                "orientation is not checked.", self.styles["cell"])]
+        return items
 
     def _limitations(self, width: float) -> Table:
         box = Table([[Paragraph(LIMITATIONS, self.styles["note"])]], colWidths=[width])
@@ -723,9 +802,9 @@ class UltimatePDFGenerator:
                       "For research only; not for clinical use.", self.styles["subtitle"]),
             self._meta_strip(response, width),
             Spacer(1, 10),
-            self._result_panel(response, attribution, width),
+            self._result_panel(response, width),
             self._section("Attribution map" if attribution is not None else "Input image",
-                          self._figure(image, attribution, width)),
+                          self._figure(response, image, attribution, width)),
             Spacer(1, 10),
             self._limitations(width),
         ]
@@ -739,14 +818,10 @@ class UltimatePDFGenerator:
             "Input image check", self._image_check_section(response, image, width),
             "Descriptive statistics of the uploaded file. They are not a diagnostic quality "
             "assessment."))
-        if self._response_is_long(response):
-            text = clean_markdown(response.raw_response) or "No text returned"
-            story.append(self._section("Full model response", [
-                Paragraph(escape(text).replace("\n", "<br/>"), self.styles["body_small"])]))
         story.append(self._section("Technical details",
                                    [self._detail_grid(self._detail_rows(response), width)]))
-        if attribution is not None:
-            story.append(self._section("Method", [self._method(attribution)]))
+        story.append(self._section("Method", self._method(attribution)
+                                   + self._generated_text_items(response)))
         return story
 
     def _build_pdf_report(self, response, original_image: Image.Image,
