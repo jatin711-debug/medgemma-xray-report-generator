@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build container
-        run: docker build -t medgemma-research-test .
+        run: docker build --build-arg APP_VERSION=${GITHUB_SHA::12} -t medgemma-research-test .
       - name: Import application without loading the model
         run: docker run --rm medgemma-research-test python -c "import main; print('Application import OK')"
 

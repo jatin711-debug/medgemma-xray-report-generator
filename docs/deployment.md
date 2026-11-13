@@ -36,7 +36,9 @@ The test is opt-in, permits only loopback endpoints and the dedicated test datab
 
 ## Optional model smoke test
 
-No model runs during the regular test suite. To verify a gated model download and real inference later, explicitly set `RUN_MODEL_SMOKE=1` and `MODEL_SMOKE_IMAGE` to a non-sensitive local sample image, authenticate to Hugging Face, then run `python -m unittest discover -s tests -p test_model_smoke.py -v`. This checks that inference returns a response; it does not establish accuracy or clinical validity.
+No model runs during the regular test suite. To verify a gated model download and real inference later, explicitly set `RUN_MODEL_SMOKE=1` and `MODEL_SMOKE_IMAGE` to a non-sensitive local sample image, authenticate to Hugging Face, then run `python -m unittest discover -s tests -p test_model_smoke.py -v`. This checks that inference returns a response, that the attribution map is produced or reported as unavailable, and that a PDF renders; it does not establish accuracy or clinical validity.
+
+The attribution map adds one forward and backward pass through the language model, which takes extra time and memory beyond generation. If GPU memory is tight, set `MEDGEMMA_ATTRIBUTION=0`; failures are logged and the report notes the map is unavailable.
 
 ## Dependency updates
 

@@ -6,12 +6,14 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 from fastapi.testclient import TestClient
 from PIL import Image
 
 import src.api.app as api
 from src.api.schemas import AnalysisResponse, RadiologyFindings
-from src.core.medical_analyzer import MedicalImageAnalyzer
+from src.core.heatmap import AttributionMap
+from src.core.medical_analyzer import InferenceResult, MedicalImageAnalyzer
 
 
 class AnalysisTests(unittest.TestCase):
@@ -66,13 +68,16 @@ class AnalysisTests(unittest.TestCase):
                                   findings=findings, raw_response='uncertain', image_metadata={})
         image = Image.new('RGB', (4, 4))
 
+        attribution = object()
+
         class Analyzer:
             async def analyze_image_from_upload(self, file):
-                return result, image
+                return result, image, attribution
 
         class Generator:
-            def generate_pdf_report(self, response, original):
+            def generate_pdf_report(self, response, original, heatmap=None):
                 assert response.analysis_id == 'test-id' and original is image
+                assert heatmap is attribution
                 return 'reports/test.pdf'
 
         with patch.object(api, 'analyzer', Analyzer()), patch.object(api, 'pdf_generator', Generator()):
@@ -80,6 +85,56 @@ class AnalysisTests(unittest.TestCase):
             response = client.post('/analyze-and-report', files={'file': ('x.png', b'content', 'image/png')})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {'pdf_path': 'reports/test.pdf', 'analysis_id': 'test-id'})
+
+    def test_attribution_failure_does_not_fail_the_analysis(self):
+        analyzer = MedicalImageAnalyzer()
+        result = InferenceResult(raw_response='raw', findings=None)
+        with patch.dict('os.environ', {'MEDGEMMA_ATTRIBUTION': '1'}), \
+             patch('src.core.medical_analyzer.compute_pneumothorax_attribution',
+                   side_effect=RuntimeError('CUDA out of memory')):
+            analyzer._attach_attribution(result, messages=[])
+        self.assertIsNone(result.attribution)
+        self.assertEqual(result.attribution_info, {'status': 'unavailable'})
+        self.assertIn('attribution_seconds', result.timings)
+
+    def test_attribution_can_be_disabled(self):
+        analyzer = MedicalImageAnalyzer()
+        result = InferenceResult(raw_response='raw', findings=None)
+        with patch.dict('os.environ', {'MEDGEMMA_ATTRIBUTION': 'off'}), \
+             patch('src.core.medical_analyzer.compute_pneumothorax_attribution') as compute:
+            analyzer._attach_attribution(result, messages=[])
+        compute.assert_not_called()
+        self.assertEqual(result.attribution_info, {'status': 'disabled'})
+
+    def test_successful_attribution_is_summarised(self):
+        analyzer = MedicalImageAnalyzer()
+        result = InferenceResult(raw_response='raw', findings=None)
+        attribution = AttributionMap(np.ones((16, 16), dtype=np.float32), 1.23456, 'method', 'target')
+        with patch.dict('os.environ', {'MEDGEMMA_ATTRIBUTION': ''}), \
+             patch('src.core.medical_analyzer.compute_pneumothorax_attribution', return_value=attribution):
+            analyzer._attach_attribution(result, messages=[])
+        self.assertIs(result.attribution, attribution)
+        self.assertEqual(result.attribution_info, {'status': 'available', 'method': 'method',
+                                                   'target': 'target', 'target_score': 1.235})
+
+    def test_response_records_model_runtime_timings_and_image_check(self):
+        analyzer = MedicalImageAnalyzer()
+        analyzer.runtime = analyzer._describe_runtime('cpu', quantized=False)
+        findings = RadiologyFindings(anatomical_structures=[], abnormalities=[],
+                                     impression='Indeterminate', recommendations=[], confidence_level='N/A')
+        result = InferenceResult(raw_response='raw', findings=findings,
+                                 attribution_info={'status': 'disabled'},
+                                 timings={'generation_seconds': 1.5})
+        response = analyzer._make_response(result, {'filename': 'x.png'}, Image.new('L', (8, 8), 50))
+        self.assertEqual(response.model_info['precision'], 'float32')
+        self.assertEqual(response.model_info['device'], 'cpu')
+        self.assertEqual(response.model_info['model_id'], analyzer.model_id)
+        self.assertIn('app_version', response.model_info)
+        self.assertEqual(response.timings, {'generation_seconds': 1.5})
+        self.assertEqual(response.attribution, {'status': 'disabled'})
+        self.assertEqual(response.image_metadata['image_check']['mean_intensity'], 50.0)
+        self.assertEqual(analyzer._describe_runtime('cpu', quantized=True)['precision'],
+                         '4-bit NF4 weights, bfloat16 compute')
 
     def test_report_generation_with_indeterminate_output(self):
         findings = RadiologyFindings(anatomical_structures=['Chest X-ray'],

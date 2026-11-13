@@ -1,6 +1,9 @@
 services:
   api:
-    build: .
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-unknown}
     ports:
       - "127.0.0.1:8000:8000"
     environment:
@@ -11,6 +14,7 @@ services:
       MODEL_ID: ${MODEL_ID:-google/medgemma-1.5-4b-it}
       HF_TOKEN: ${HF_TOKEN:-}
       MEDGEMMA_QUANTIZE: ${MEDGEMMA_QUANTIZE:-0}
+      MEDGEMMA_ATTRIBUTION: ${MEDGEMMA_ATTRIBUTION:-1}
       ENABLE_URL_FETCH: "false"
     volumes:
       - reports:/app/reports

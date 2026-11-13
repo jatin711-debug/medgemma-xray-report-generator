@@ -3,18 +3,41 @@ import asyncio
 import uuid
 import gc
 import logging
+import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from fastapi import UploadFile, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from PIL import Image
 import torch
+import transformers
 from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
 from src.api.schemas import AnalysisResponse, RadiologyFindings
 from src.services.image_input import fetch_image, read_upload
+from src.core.attribution import compute_pneumothorax_attribution
 from src.core.findings import parse_ai_response
+from src.core.heatmap import AttributionMap
+from src.core.image_quality import image_statistics
+from src.core.version import app_version
 
 logger = logging.getLogger(__name__)
+
+
+def attribution_enabled() -> bool:
+    """Attribution maps are on unless MEDGEMMA_ATTRIBUTION is set to a false value."""
+    return os.getenv("MEDGEMMA_ATTRIBUTION", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+@dataclass
+class InferenceResult:
+    """One model run: text output, parsed findings, optional attribution and timings."""
+    raw_response: str
+    findings: RadiologyFindings
+    attribution: Optional[AttributionMap] = None
+    attribution_info: Dict[str, Any] = field(default_factory=lambda: {"status": "disabled"})
+    timings: Dict[str, float] = field(default_factory=dict)
+
 
 class MedicalImageAnalyzer:
     """
@@ -46,6 +69,7 @@ class MedicalImageAnalyzer:
         self.allowed_extensions = {'.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.webp'}
         self.model_loaded = False
         self.model_loading_error: Optional[str] = None
+        self.runtime: Dict[str, str] = {}
         self._model_lock = asyncio.Lock()
         self.ensure_reports_directory()
         
@@ -143,6 +167,9 @@ class MedicalImageAnalyzer:
                 attn_implementation="eager",
                 device_map="auto"  # Automatically handle device placement
             )
+            # Inference never trains; frozen weights also keep attribution passes lean.
+            self.model.requires_grad_(False)
+            self.runtime = self._describe_runtime(device, quantization_config is not None)
             self.model_loaded = True
             self.model_loading_error = None
             logger.info("Model loaded successfully.")
@@ -161,47 +188,69 @@ class MedicalImageAnalyzer:
                 torch.cuda.empty_cache()
             raise RuntimeError(self.model_loading_error) from e
     
+    @staticmethod
+    def _describe_runtime(device: str, quantized: bool) -> Dict[str, str]:
+        """Summarise numeric precision and hardware for report provenance."""
+        if quantized:
+            precision = "4-bit NF4 weights, bfloat16 compute"
+        else:
+            precision = "bfloat16" if device == "cuda" else "float32"
+        device_label = device
+        if device == "cuda":
+            try:
+                device_label = f"cuda ({torch.cuda.get_device_name(0)})"
+            except Exception:
+                pass
+        return {"precision": precision, "device": device_label}
+
+    def model_info(self) -> Dict[str, str]:
+        """Identify the model, runtime and application build used for an analysis."""
+        return {"model_id": self.model_id, **self.runtime, "app_version": app_version(),
+                "torch": torch.__version__, "transformers": transformers.__version__}
+
     def parse_ai_response(self, raw_response: str) -> RadiologyFindings:
         """Delegate parsing to the standalone, model-independent parser."""
         return parse_ai_response(raw_response)
 
-    async def analyze_image(self, image: Image.Image) -> tuple[str, RadiologyFindings]:
+    async def analyze_image(self, image: Image.Image) -> InferenceResult:
         """
         Perform AI-powered medical image analysis using Med-GEMMA.
-        Returns the raw text response and structured findings.
+        Returns the raw text, parsed findings, optional attribution map and timings.
         """
         async with self._model_lock:
             await run_in_threadpool(self._load_model)
             return await run_in_threadpool(self._analyze_image, image)
 
-    def _analyze_image(self, image: Image.Image) -> tuple[str, RadiologyFindings]:
+    @staticmethod
+    def _messages(image: Image.Image) -> list[dict]:
+        """Build the pneumothorax prompt; attribution reuses it unchanged."""
+        return [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "You are a highly experienced radiologist. You analyze chest X-rays for critical findings, especially pneumothorax."}]
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Review this chest X-ray carefully for signs of pneumothorax, including loss of lung markings, "
+                            "pleural line visibility, and increased radiolucency.\n\n"
+                            "Respond strictly in the following format:\n\n"
+                            "**Finding**: [Pneumothorax detected | No pneumothorax detected | Indeterminate]\n"
+                            "**Brief Reasoning**: [One-sentence justification]"
+                        )
+                    },
+                    {"type": "image", "image": image}
+                ]
+            }
+        ]
+
+    def _analyze_image(self, image: Image.Image) -> InferenceResult:
         """Run synchronous inference while the caller holds the model lock."""
         try:
-            image_for_model = image
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": [{"type": "text", "text": "You are a highly experienced radiologist. You analyze chest X-rays for critical findings, especially pneumothorax."}]
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "Review this chest X-ray carefully for signs of pneumothorax, including loss of lung markings, "
-                                "pleural line visibility, and increased radiolucency.\n\n"
-                                "Respond strictly in the following format:\n\n"
-                                "**Finding**: [Pneumothorax detected | No pneumothorax detected | Indeterminate]\n"
-                                "**Brief Reasoning**: [One-sentence justification]"
-                            )
-                        },
-                        {"type": "image", "image": image_for_model}
-                    ]
-                }
-            ]
-
+            messages = self._messages(image)
             inputs = self.processor.apply_chat_template(
                 messages,
                 add_generation_prompt=True,
@@ -211,33 +260,70 @@ class MedicalImageAnalyzer:
             ).to(self.model.device)
 
             input_len = inputs["input_ids"].shape[-1]
+            started = time.perf_counter()
             with torch.inference_mode():
                 output = self.model.generate(**inputs, max_new_tokens=256, do_sample=False)
+            generation_seconds = time.perf_counter() - started
             raw_response = self.processor.decode(output[0][input_len:], skip_special_tokens=True)
             findings = self.parse_ai_response(raw_response)
-            return raw_response, findings
         except Exception as e:
             logger.exception("Image analysis failed")
             raise HTTPException(status_code=500, detail="Image analysis failed") from e
 
-    def _make_response(self, raw_response: str, findings: RadiologyFindings, metadata: dict) -> AnalysisResponse:
+        result = InferenceResult(raw_response=raw_response, findings=findings,
+                                 timings={"generation_seconds": round(generation_seconds, 2)})
+        self._attach_attribution(result, messages)
+        return result
+
+    def _attach_attribution(self, result: InferenceResult, messages: list[dict]) -> None:
+        """Add the attribution map when enabled; its failure never fails the analysis."""
+        if not attribution_enabled():
+            result.attribution_info = {"status": "disabled"}
+            return
+        started = time.perf_counter()
+        try:
+            attribution = compute_pneumothorax_attribution(self.model, self.processor, messages)
+        except Exception:
+            logger.warning("Attribution map could not be computed", exc_info=True)
+            result.attribution_info = {"status": "unavailable"}
+        else:
+            result.attribution = attribution
+            result.attribution_info = {"status": "available", "method": attribution.method,
+                                       "target": attribution.target,
+                                       "target_score": round(attribution.target_score, 3)}
+        finally:
+            result.timings["attribution_seconds"] = round(time.perf_counter() - started, 2)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    def _make_response(self, result: InferenceResult, metadata: dict,
+                       image: Image.Image) -> AnalysisResponse:
         """Build a response using a UTC timestamp and a generated identifier."""
         return AnalysisResponse(
             analysis_id=str(uuid.uuid4()), timestamp=datetime.now(timezone.utc).isoformat(),
-            findings=findings, raw_response=raw_response, image_metadata=metadata,
+            findings=result.findings, raw_response=result.raw_response,
+            image_metadata={**metadata, "image_check": image_statistics(image)},
+            model_info=self.model_info(), timings=dict(result.timings),
+            attribution=dict(result.attribution_info),
         )
 
-    async def analyze_image_from_upload(self, file: UploadFile) -> tuple[AnalysisResponse, Image.Image]:
+    async def analyze_image_from_upload(
+        self, file: UploadFile
+    ) -> tuple[AnalysisResponse, Image.Image, Optional[AttributionMap]]:
         """Validate an uploaded image and run one model analysis."""
         image, metadata = await read_upload(file, self.max_image_size)
-        raw_response, findings = await self.analyze_image(image)
-        return self._make_response(raw_response, findings, metadata), image
+        result = await self.analyze_image(image)
+        response = await run_in_threadpool(self._make_response, result, metadata, image)
+        return response, image, result.attribution
 
-    async def analyze_image_from_url(self, image_url: str) -> tuple[AnalysisResponse, Image.Image]:
+    async def analyze_image_from_url(
+        self, image_url: str
+    ) -> tuple[AnalysisResponse, Image.Image, Optional[AttributionMap]]:
         """Fetch an enabled public image URL and run one model analysis."""
         image, metadata = await self.fetch_image_from_url(image_url)
-        raw_response, findings = await self.analyze_image(image)
-        return self._make_response(raw_response, findings, metadata), image
+        result = await self.analyze_image(image)
+        response = await run_in_threadpool(self._make_response, result, metadata, image)
+        return response, image, result.attribution
 
     async def fetch_image_from_url(self, image_url: str) -> tuple[Image.Image, Dict[str, Any]]:
         """Fetch an image only when the optional URL workflow is enabled."""

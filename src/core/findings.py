@@ -4,6 +4,29 @@ import re
 from src.api.schemas import RadiologyFindings
 
 
+_SECTION_LABELS = {"finding": r"Finding", "reasoning": r"(?:Brief\s+)?Reasoning"}
+
+
+def clean_markdown(text: str) -> str:
+    """Remove Markdown emphasis, headings, bullets and code marks from model text."""
+    text = re.sub(r"(\*\*|__|`)", "", text)
+    text = re.sub(r"(?m)^[ \t]*#+[ \t]*", "", text)
+    text = re.sub(r"(?m)^[ \t]*[-*][ \t]+", "", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def split_response(raw_response: str) -> dict[str, str | None]:
+    """Return the model's finding and reasoning lines as plain text, when present."""
+    sections: dict[str, str | None] = {}
+    for key, label in _SECTION_LABELS.items():
+        match = re.search(rf"(?im)^[ \t]*[*_]*{label}[*_]*[ \t]*:[*_]*[ \t]*(\S[^\r\n]*)$",
+                          raw_response)
+        value = clean_markdown(match.group(1)) if match else ""
+        sections[key] = value or None
+    return sections
+
+
 def parse_ai_response(raw_response: str) -> RadiologyFindings:
     """
     Parse raw AI model output for pneumothorax detection.

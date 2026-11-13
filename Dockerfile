@@ -1,7 +1,11 @@
 FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
 
+# The image excludes .git, so pass the commit for report provenance:
+# docker build --build-arg APP_VERSION=$(git rev-parse --short HEAD) .
+ARG APP_VERSION=unknown
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
-    HF_HOME=/home/app/.cache/huggingface
+    HF_HOME=/home/app/.cache/huggingface \
+    APP_VERSION=${APP_VERSION}
 WORKDIR /app
 
 COPY requirements.txt requirements.lock ./

@@ -1,7 +1,7 @@
 """Parser regression checks requiring neither PyTorch nor a downloaded model."""
 import unittest
 
-from src.core.findings import parse_ai_response
+from src.core.findings import clean_markdown, parse_ai_response, split_response
 
 
 class FindingsTests(unittest.TestCase):
@@ -32,3 +32,23 @@ class FindingsTests(unittest.TestCase):
             "**Brief Reasoning**: Synthetic explanation."
         )
         self.assertEqual(result.impression, "No Pneumothorax Detected")
+
+
+class ResponseDisplayTests(unittest.TestCase):
+    def test_split_response_strips_markdown_and_separates_lines(self):
+        sections = split_response(
+            "**Finding**: No pneumothorax detected\n"
+            "**Brief Reasoning**: Lung markings reach the **periphery**."
+        )
+        self.assertEqual(sections, {"finding": "No pneumothorax detected",
+                                    "reasoning": "Lung markings reach the periphery."})
+
+    def test_split_response_accepts_label_variants_and_missing_sections(self):
+        self.assertEqual(split_response("Reasoning: short note")["reasoning"], "short note")
+        self.assertEqual(split_response("__Finding:__ Indeterminate")["finding"], "Indeterminate")
+        self.assertEqual(split_response("free text only"), {"finding": None, "reasoning": None})
+        self.assertEqual(split_response("**Finding**:   ")["finding"], None)
+
+    def test_clean_markdown_removes_formatting_marks(self):
+        self.assertEqual(clean_markdown("## Heading\n- **bold** `code`  item"),
+                         "Heading\nbold code item")

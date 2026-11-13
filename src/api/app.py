@@ -96,13 +96,14 @@ async def analyze_and_generate_report(
         raise HTTPException(status_code=400, detail="File must be an image")
     
     # Perform analysis once
-    analysis_response, original_image = await analyzer.analyze_image_from_upload(file)
+    analysis_response, original_image, attribution = await analyzer.analyze_image_from_upload(file)
     
     # Generate PDF in thread pool to avoid blocking the event loop
     pdf_path = await run_in_threadpool(
         pdf_generator.generate_pdf_report,
         analysis_response,
-        original_image
+        original_image,
+        attribution
     )
     
     return PDFGenerationResponse(
@@ -149,7 +150,7 @@ async def analyze_image_url(request: ImageURLRequest):
         - Timeout protection
         - Protocol validation (HTTP/HTTPS only)
     """
-    analysis_response, _ = await analyzer.analyze_image_from_url(str(request.image_url))
+    analysis_response, _, _ = await analyzer.analyze_image_from_url(str(request.image_url))
     return analysis_response
 
 # The working path for the PDF report generation
@@ -181,13 +182,14 @@ async def analyze_url_and_generate_report(
         raise HTTPException(status_code=503, detail="S3 storage is not configured")
 
     # Perform analysis once
-    analysis_response, original_image = await analyzer.analyze_image_from_url(str(request.image_url))
+    analysis_response, original_image, attribution = await analyzer.analyze_image_from_url(str(request.image_url))
     
     # Generate PDF in thread pool to avoid blocking the event loop
     local_pdf_path = await run_in_threadpool(
         pdf_generator.generate_pdf_report,
         analysis_response,
-        original_image
+        original_image,
+        attribution
     )
     
     # Create a unique S3 key, e.g., using the analysis ID

@@ -8,6 +8,11 @@ API_KEY_READER=
 ENABLE_API_DOCS=false
 MODEL_ID=google/medgemma-1.5-4b-it
 MEDGEMMA_QUANTIZE=auto
+# Add a gradient-based attribution map to reports (one extra forward/backward pass).
+# Set to 0 to disable, e.g. on low-memory GPUs.
+MEDGEMMA_ATTRIBUTION=1
+# Optional build identifier shown in reports; defaults to the checked-out git commit.
+APP_VERSION=
 ENABLE_URL_FETCH=false
 
 # Optional URL-to-S3/MySQL reporting integration.

@@ -107,7 +107,7 @@ class StorageIntegrationTests(unittest.TestCase):
                                   findings=findings, raw_response='synthetic result', image_metadata={})
         class Analyzer:
             async def analyze_image_from_url(self, url):
-                return result, Image.new('RGB', (16, 16))
+                return result, Image.new('RGB', (16, 16)), None
 
         connection = None
         try:

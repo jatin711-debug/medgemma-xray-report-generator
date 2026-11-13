@@ -1,764 +1,764 @@
-import os
-from xml.sax.saxutils import escape
+"""Render the experimental pneumothorax research report as a PDF."""
 import io
 import logging
-from datetime import datetime
-from PIL import Image, ImageFilter
-from reportlab.lib.pagesizes import letter
+import math
+import os
+from datetime import datetime, timezone
+from functools import partial
+from pathlib import Path
+from typing import Optional
+from xml.sax.saxutils import escape
+
+from PIL import Image
 from reportlab.lib import colors
-from reportlab.lib.units import inch
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, 
-    PageBreak, Image as ReportLabImage, KeepTogether, Flowable
-)
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfgen.canvas import Canvas
+from reportlab.platypus import (
+    HRFlowable, Image as ReportLabImage, KeepTogether, Paragraph, SimpleDocTemplate,
+    Spacer, Table, TableStyle,
+)
+
+from src.core.findings import clean_markdown, split_response
+from src.core.heatmap import (
+    AttributionMap, EvidenceSummary, render_overlay, render_token_grid, summarize_evidence,
+)
+from src.core.image_quality import intensity_histogram
+from src.reports.charts import (
+    HEX, PALETTE, DecisionGauge, IntensityHistogram, OverlayLegend, RegionChart,
+    format_percent, format_signed,
+)
 from src.reports.storage import atomic_report, report_path
 
-# Setup basic logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class GradientRect(Flowable):
-    """Custom gradient rectangle for premium visual effects"""
-    def __init__(self, width, height, start_color, end_color):
-        Flowable.__init__(self)
-        self.width = width
-        self.height = height
-        self.start_color = start_color
-        self.end_color = end_color
+ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
+PREVIEW_MAX_SIDE = 1000
+NOT_RECORDED = "Not recorded"
+MARGIN = 40
+REASONING_PREVIEW_CHARS = 320
+WHITE_PIXEL_FLAG_PCT = 5.0
+NARROW_RANGE_LEVELS = 100
 
-    def draw(self):
-        canvas = self.canv
-        canvas.saveState()
-        
-        # Create gradient effect with multiple rectangles
-        steps = 50
-        for i in range(steps):
-            ratio = i / float(steps)
-            r = self.start_color.red * (1 - ratio) + self.end_color.red * ratio
-            g = self.start_color.green * (1 - ratio) + self.end_color.green * ratio
-            b = self.start_color.blue * (1 - ratio) + self.end_color.blue * ratio
-            
-            color = colors.Color(r, g, b)
-            canvas.setFillColor(color)
-            canvas.rect(0, i * self.height / steps, self.width, self.height / steps, fill=1, stroke=0)
-        
-        canvas.restoreState()
+# (background, accent bar, text) for each kind of model output.
+OUTCOME_TONES = {
+    "danger": (colors.HexColor("#FEF2F2"), colors.HexColor("#DC2626"), colors.HexColor("#991B1B")),
+    "success": (colors.HexColor("#F0FDF4"), colors.HexColor("#16A34A"), colors.HexColor("#166534")),
+    "neutral": (colors.HexColor("#F3F4F6"), colors.HexColor("#6B7280"), colors.HexColor("#374151")),
+}
+_OUTCOMES = {"pneumothorax detected": "danger", "no pneumothorax detected": "success"}
 
-class PremiumCard(Flowable):
-    """Premium card with shadows and gradients"""
-    def __init__(self, width, height, content, bg_color, accent_color, shadow=True):
-        Flowable.__init__(self)
-        self.width = width
-        self.height = height
-        self.content = content
-        self.bg_color = bg_color
-        self.accent_color = accent_color
-        self.shadow = shadow
+POSITIVE_LABEL = "‘Pneumothorax detected’"
+NEGATIVE_LABEL = "‘No pneumothorax detected’"
+LIMITATIONS = (
+    "<b>Experimental research output.</b> Not validated for diagnosis, clinical decisions, or "
+    "patient care. The model can be wrong or indeterminate, and no calibrated confidence is "
+    "available. Attribution shows which image regions influenced one model score; it is not a "
+    "segmentation, a lesion outline or a validated localization. Do not use real patient data "
+    "without appropriate authorization and safeguards."
+)
 
-    def draw(self):
-        canvas = self.canv
-        canvas.saveState()
-        
-        # Draw shadow
-        if self.shadow:
-            shadow_offset = 3
-            canvas.setFillColor(colors.Color(0, 0, 0, alpha=0.1))
-            canvas.roundRect(shadow_offset, -shadow_offset, self.width, self.height, 8, fill=1, stroke=0)
-        
-        # Draw main card
-        canvas.setFillColor(self.bg_color)
-        canvas.setStrokeColor(self.accent_color)
-        canvas.setLineWidth(2)
-        canvas.roundRect(0, 0, self.width, self.height, 12, fill=1, stroke=1)
-        
-        # Draw accent border
-        canvas.setStrokeColor(self.accent_color)
-        canvas.setLineWidth(4)
-        canvas.line(0, self.height - 4, self.width, self.height - 4)
-        
-        canvas.restoreState()
+
+# --- formatting helpers -------------------------------------------------------------------
+
+def outcome_tone(impression: str) -> str:
+    """Return 'danger', 'success' or 'neutral' for the parsed model output."""
+    return _OUTCOMES.get(impression.strip().lower(), "neutral")
+
+
+def _sentence_case(text: str) -> str:
+    text = text.strip()
+    return text[:1].upper() + text[1:].lower() if text else text
+
+
+def _preview(text: str, limit: int) -> tuple[str, bool]:
+    """Shorten ``text`` at a word boundary; report whether anything was cut."""
+    if len(text) <= limit:
+        return text, False
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:.")
+    return cut + "…", True
+
+
+def _truncate(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _format_bytes(size) -> Optional[str]:
+    if not isinstance(size, (int, float)) or size < 0:
+        return None
+    if size < 1024:
+        return f"{int(size)} B"
+    if size < 1024 ** 2:
+        return f"{size / 1024:.0f} KB"
+    return f"{size / 1024 ** 2:.1f} MB"
+
+
+def _format_timestamp(value: str, compact: bool = False) -> str:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return value or NOT_RECORDED
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.strftime("%d %b %Y, %H:%M UTC" if compact else "%B %d, %Y, %H:%M:%S UTC")
+
+
+def answer_preference(score: float) -> float:
+    """Share of the two answers' first-token probability that goes to 'Pneumothorax'.
+
+    This is the model's own softmax restricted to the two diverging tokens. It is
+    not calibrated against ground truth and is not a probability of disease.
+    """
+    if score >= 0:
+        return 1.0 / (1.0 + math.exp(-score))
+    odds = math.exp(score)
+    return odds / (1.0 + odds)
+
+
+def score_agreement(impression: str, score: float) -> tuple[str, str]:
+    """Compare the decision score's direction with the generated answer.
+
+    Returns a tone ('success', 'danger' or 'neutral') and a sentence for the report.
+    """
+    tone = outcome_tone(impression)
+    if tone == "neutral":
+        return "neutral", "Answer not definite; the score compares the two definite answers."
+    if score == 0:
+        return "neutral", "No preference between the two definite answers."
+    agrees = score > 0 if tone == "danger" else score < 0
+    if agrees:
+        return "success", "✓ Same direction as the generated answer."
+    return "danger", "▲ Points away from the generated answer; treat with extra caution."
+
+
+def region_headline(summary: EvidenceSummary) -> str:
+    """One plain-language sentence on how much evidence points each way, and where."""
+    parts = []
+    for index, share, label in ((1, summary.toward_share, POSITIVE_LABEL),
+                                (2, summary.against_share, NEGATIVE_LABEL)):
+        text = f"{format_percent(share)} raised {label}"
+        region = max(summary.regions, key=lambda item: item[index])
+        if region[index] > 0:
+            text += f" (largest share: {region[0].lower()})"
+        parts.append(text)
+    return "Of the total attribution, " + " and ".join(parts) + "."
+
+
+def border_note(summary: EvidenceSummary) -> Optional[str]:
+    """Flag attribution that sits disproportionately on the image edge."""
+    if summary.border_share <= 1.5 * summary.border_area:
+        return None
+    return (f"{format_percent(summary.border_share)} of the attribution lies in the outermost "
+            f"ring of tokens, which covers only {format_percent(summary.border_area)} of the "
+            "image. Labels, markers and borders usually sit there, so check whether the model "
+            "relied on them.")
+
+
+def image_check_flags(check: dict) -> list[str]:
+    """Descriptive notes about the input file, using the thresholds stated in each note."""
+    flags = []
+    if not check.get("grayscale", True):
+        flags.append("Colour channels differ. Chest radiographs are normally grayscale; "
+                     "confirm this is the intended image.")
+    white = check.get("white_pixel_pct")
+    if isinstance(white, (int, float)) and white > WHITE_PIXEL_FLAG_PCT:
+        flags.append(f"{white:.1f}% of pixels are pure white (flagged above "
+                     f"{WHITE_PIXEL_FLAG_PCT:.0f}%), which can hide detail in bright areas.")
+    low, high = check.get("intensity_p1"), check.get("intensity_p99")
+    if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+        if high - low < NARROW_RANGE_LEVELS:
+            flags.append(f"The 1st–99th percentile range spans only {high - low:.0f} of 255 "
+                         f"levels (flagged below {NARROW_RANGE_LEVELS}); the image may be low "
+                         "in contrast.")
+    return flags
+
+
+def _numbered_canvas(font: str, color, right: float, baseline: float):
+    """A canvas class that adds 'Page n of N' once the page count is known."""
+
+    class NumberedCanvas(Canvas):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._page_states = []
+
+        def showPage(self):
+            self._page_states.append(dict(self.__dict__))
+            self._startPage()
+
+        def save(self):
+            total = len(self._page_states)
+            for state in self._page_states:
+                self.__dict__.update(state)
+                self.setFont(font, 8)
+                self.setFillColor(color)
+                self.drawRightString(right, baseline, f"Page {self._pageNumber} of {total}")
+                Canvas.showPage(self)
+            Canvas.save(self)
+
+    return NumberedCanvas
+
+
+# --- report -------------------------------------------------------------------------------
 
 class UltimatePDFGenerator:
     def __init__(self, reports_dir: str = "reports"):
         self.reports_dir = reports_dir
         os.makedirs(reports_dir, exist_ok=True)
+        self.colors = PALETTE
         self._setup_fonts()
-        self._setup_colors()
         self._setup_styles()
 
     def _setup_fonts(self):
-        """Setup premium typography"""
+        """Use the bundled fonts, falling back to built-in PDF fonts."""
         try:
-            pdfmetrics.registerFont(TTFont('Montserrat', 'assets/Montserrat-Regular.ttf'))
-            pdfmetrics.registerFont(TTFont('Montserrat-Bold', 'assets/Montserrat-Bold.ttf'))
-            pdfmetrics.registerFont(TTFont('Montserrat-Light', 'assets/Montserrat-Light.ttf'))
-            pdfmetrics.registerFont(TTFont('Source', 'assets/SourceSansPro-Regular.ttf'))
-            pdfmetrics.registerFont(TTFont('Source-Bold', 'assets/SourceSansPro-Bold.ttf'))
-            self.font_display = 'Montserrat-Bold'
-            self.font_body = 'Source'
-            self.font_body_bold = 'Source-Bold'
-            self.font_light = 'Montserrat-Light'
-            logger.info("Successfully loaded premium fonts.")
+            for name, filename in (("Montserrat-Bold", "Montserrat-Bold.ttf"),
+                                   ("Source", "SourceSansPro-Regular.ttf"),
+                                   ("Source-Bold", "SourceSansPro-Bold.ttf")):
+                pdfmetrics.registerFont(TTFont(name, str(ASSETS_DIR / filename)))
+            pdfmetrics.registerFontFamily("Source", normal="Source", bold="Source-Bold",
+                                          italic="Source", boldItalic="Source-Bold")
+            self.font_display, self.font_body, self.font_body_bold = (
+                "Montserrat-Bold", "Source", "Source-Bold")
         except Exception:
-            logger.warning("Premium fonts not found in 'assets/' directory. Using built-in fonts.")
-            self.font_display = 'Helvetica-Bold'
-            self.font_body = 'Helvetica'
-            self.font_body_bold = 'Helvetica-Bold'
-            self.font_light = 'Helvetica'
-
-    def _setup_colors(self):
-        """Premium medical color palette"""
-        self.colors = {
-            # Primary medical blues
-            'primary_dark': colors.HexColor("#0B1426"),
-            'primary': colors.HexColor("#1E3A8A"),
-            'primary_light': colors.HexColor("#3B82F6"),
-            'primary_ultra_light': colors.HexColor("#DBEAFE"),
-            
-            # Success greens
-            'success_dark': colors.HexColor("#065F46"),
-            'success': colors.HexColor("#10B981"),
-            'success_light': colors.HexColor("#6EE7B7"),
-            'success_ultra_light': colors.HexColor("#D1FAE5"),
-            
-            # Warning/Alert colors
-            'warning_dark': colors.HexColor("#92400E"),
-            'warning': colors.HexColor("#F59E0B"),
-            'warning_light': colors.HexColor("#FCD34D"),
-            'warning_ultra_light': colors.HexColor("#FEF3C7"),
-            
-            # Danger/Critical
-            'danger_dark': colors.HexColor("#7F1D1D"),
-            'danger': colors.HexColor("#EF4444"),
-            'danger_light': colors.HexColor("#FCA5A5"),
-            'danger_ultra_light': colors.HexColor("#FEE2E2"),
-            
-            # Sophisticated grays
-            'gray_900': colors.HexColor("#111827"),
-            'gray_800': colors.HexColor("#1F2937"),
-            'gray_700': colors.HexColor("#374151"),
-            'gray_600': colors.HexColor("#4B5563"),
-            'gray_500': colors.HexColor("#6B7280"),
-            'gray_400': colors.HexColor("#9CA3AF"),
-            'gray_300': colors.HexColor("#D1D5DB"),
-            'gray_200': colors.HexColor("#E5E7EB"),
-            'gray_100': colors.HexColor("#F3F4F6"),
-            'gray_50': colors.HexColor("#F9FAFB"),
-            
-            # Pure colors
-            'white': colors.white,
-            'black': colors.black,
-            
-            # Accent colors
-            'accent_purple': colors.HexColor("#8B5CF6"),
-            'accent_cyan': colors.HexColor("#06B6D4"),
-            'accent_emerald': colors.HexColor("#10B981"),
-        }
+            logger.warning("Bundled fonts not found in %s; using built-in fonts.", ASSETS_DIR)
+            self.font_display, self.font_body, self.font_body_bold = (
+                "Helvetica-Bold", "Helvetica", "Helvetica-Bold")
+        self.fonts = (self.font_body, self.font_body_bold)
 
     def _setup_styles(self):
-        """Create sophisticated typography system"""
+        c = self.colors
+
+        def style(name, font, size, leading, color, **extra):
+            return ParagraphStyle(name, fontName=font, fontSize=size, leading=leading,
+                                  textColor=color, **extra)
+
+        body, bold = self.font_body, self.font_body_bold
         self.styles = {
-            # Hero title - reduced size for professionalism
-            'hero_title': ParagraphStyle(
-                'HeroTitle',
-                fontName=self.font_display,
-                fontSize=24,
-                textColor=self.colors['primary_dark'],
-                spaceAfter=6,
-                leading=28,
-                alignment=TA_LEFT,
-                wordWrap='CJK'
-            ),
-            
-            # Main title - more compact
-            'main_title': ParagraphStyle(
-                'MainTitle',
-                fontName=self.font_display,
-                fontSize=20,
-                textColor=self.colors['primary'],
-                spaceAfter=5,
-                leading=24,
-                alignment=TA_LEFT,
-                wordWrap='CJK'
-            ),
-            
-            # Subtitle with better wrapping
-            'subtitle': ParagraphStyle(
-                'Subtitle',
-                fontName=self.font_body,
-                fontSize=12,
-                textColor=self.colors['gray_600'],
-                spaceAfter=20,
-                leading=16,
-                alignment=TA_LEFT,
-                wordWrap='CJK'
-            ),
-            
-            # Section headers - professional size
-            'section_header': ParagraphStyle(
-                'SectionHeader',
-                fontName=self.font_display,
-                fontSize=16,
-                textColor=self.colors['primary'],
-                spaceBefore=22,
-                spaceAfter=12,
-                leading=20,
-                alignment=TA_LEFT,
-                wordWrap='CJK'
-            ),
-            
-            # Subsection headers - compact
-            'subsection_header': ParagraphStyle(
-                'SubsectionHeader',
-                fontName=self.font_body_bold,
-                fontSize=12,
-                textColor=self.colors['gray_700'],
-                spaceBefore=10,
-                spaceAfter=4,
-                leading=16,
-                alignment=TA_LEFT,
-                wordWrap='CJK'
-            ),
-            
-            # Premium body text with better wrapping
-            'body': ParagraphStyle(
-                'BodyText',
-                fontName=self.font_body,
-                fontSize=10,
-                textColor=self.colors['gray_700'],
-                leading=16,
-                spaceAfter=8,
-                alignment=TA_JUSTIFY,
-                leftIndent=0,
-                rightIndent=0,
-                wordWrap='CJK'
-            ),
-            
-            # Statistics - Large numbers - more compact
-            'stat_value_large': ParagraphStyle(
-                'StatValueLarge',
-                fontName=self.font_display,
-                fontSize=28,
-                textColor=self.colors['primary'],
-                alignment=TA_CENTER,
-                spaceAfter=3,
-                leading=32,
-                wordWrap='CJK'
-            ),
-            
-            # Statistics - Medium numbers - professional size
-            'stat_value': ParagraphStyle(
-                'StatValue',
-                fontName=self.font_display,
-                fontSize=18,
-                textColor=self.colors['primary'],
-                alignment=TA_CENTER,
-                spaceAfter=3,
-                leading=22,
-                wordWrap='CJK'
-            ),
-            
-            # Stat labels - smaller for clean look
-            'stat_label': ParagraphStyle(
-                'StatLabel',
-                fontName=self.font_body,
-                fontSize=9,
-                textColor=self.colors['gray_500'],
-                alignment=TA_CENTER,
-                leading=12,
-                wordWrap='CJK'
-            ),
-            
-            # Image captions - professional size
-            'caption': ParagraphStyle(
-                'Caption',
-                fontName=self.font_body_bold,
-                fontSize=10,
-                textColor=self.colors['gray_700'],
-                alignment=TA_CENTER,
-                spaceAfter=6,
-                spaceBefore=8,
-                wordWrap='CJK'
-            ),
-            
-            # Metadata labels - compact
-            'meta_label': ParagraphStyle(
-                'MetaLabel',
-                fontName=self.font_body_bold,
-                fontSize=9,
-                textColor=self.colors['gray_800'],
-                leading=14,
-                wordWrap='CJK'
-            ),
-            
-            # Metadata values - readable size
-            'meta_value': ParagraphStyle(
-                'MetaValue',
-                fontName=self.font_body,
-                fontSize=9,
-                textColor=self.colors['gray_600'],
-                leading=14,
-                wordWrap='CJK'
-            ),
-            
-            # Disclaimer - smaller for legal text
-            'disclaimer': ParagraphStyle(
-                'Disclaimer',
-                fontName=self.font_body,
-                fontSize=8,
-                textColor=self.colors['gray_600'],
-                leading=12,
-                leftIndent=12,
-                rightIndent=12,
-                spaceAfter=8,
-                spaceBefore=8,
-                alignment=TA_JUSTIFY,
-                wordWrap='CJK'
-            ),
-            
-            # Alert text - professional sizing
-            'alert': ParagraphStyle(
-                'Alert',
-                fontName=self.font_body_bold,
-                fontSize=10,
-                textColor=self.colors['danger'],
-                leading=14,
-                spaceAfter=6,
-                spaceBefore=6,
-                wordWrap='CJK'
-            ),
-            
-            # Success text - clean look
-            'success_text': ParagraphStyle(
-                'SuccessText',
-                fontName=self.font_body_bold,
-                fontSize=10,
-                textColor=self.colors['success'],
-                leading=14,
-                wordWrap='CJK'
-            ),
-            
-            # Technical details - compact formatting
-            'technical': ParagraphStyle(
-                'Technical',
-                fontName=self.font_body,
-                fontSize=8,
-                textColor=self.colors['gray_600'],
-                leading=12,
-                leftIndent=8,
-                spaceAfter=6,
-                wordWrap='CJK'
-            ),
-            
-            # Professional finding status style
-            'finding_status': ParagraphStyle(
-                'FindingStatus',
-                fontName=self.font_body_bold,
-                fontSize=10,
-                leading=14,
-                alignment=TA_CENTER,
-                wordWrap='CJK'
-            ),
-            
-            # Professional table header style
-            'table_header': ParagraphStyle(
-                'TableHeader',
-                fontName=self.font_body_bold,
-                fontSize=10,
-                textColor=self.colors['gray_800'],
-                leading=14,
-                alignment=TA_CENTER,
-                wordWrap='CJK'
-            )
+            "title": style("Title", self.font_display, 20, 24, c["ink"]),
+            "subtitle": style("Subtitle", body, 9.5, 13, c["gray_600"], spaceBefore=2,
+                              spaceAfter=10),
+            "section": style("Section", self.font_display, 11.5, 14, c["primary"],
+                             spaceBefore=10),
+            "intro": style("Intro", body, 8.5, 11.5, c["gray_600"], spaceAfter=6),
+            "label": style("Label", bold, 7, 9, c["gray_500"]),
+            "meta_value": style("MetaValue", bold, 9.5, 12, c["gray_800"]),
+            "meta_sub": style("MetaSub", body, 7.5, 9.5, c["gray_500"]),
+            "outcome": style("Outcome", self.font_display, 16, 20, c["gray_800"]),
+            "body": style("Body", body, 9.5, 13.5, c["gray_800"]),
+            "body_small": style("BodySmall", body, 8.5, 11.5, c["gray_700"]),
+            "score": style("Score", bold, 15, 18, c["gray_800"]),
+            "cell_label": style("CellLabel", bold, 8, 10.5, c["gray_700"]),
+            "cell": style("Cell", body, 8, 10.5, c["gray_800"]),
+            "caption": style("Caption", bold, 8, 10, c["gray_700"], alignment=TA_CENTER),
+            "note": style("Note", body, 7.8, 10.5, c["gray_600"], spaceBefore=5),
+            "tile_value": style("TileValue", bold, 14, 17, c["ink"]),
+            "tile_sub": style("TileSub", body, 7.2, 9.2, c["gray_500"]),
         }
 
-    def _create_header_canvas(self, canvas, doc):
-        """Create stunning header with gradient and branding"""
+    # --- page furniture -------------------------------------------------------------------
+
+    def _draw_page_template(self, canvas, doc, analysis_id: Optional[str] = None):
+        """Draw the header and footer on each page."""
+        c = self.colors
+        page_width, page_height = doc.pagesize
         canvas.saveState()
-        
-        header_height = 80
-        page_width = doc.pagesize[0]
-        
-        # Header background gradient
-        gradient_steps = 30
-        for i in range(gradient_steps):
-            ratio = i / float(gradient_steps)
-            alpha = 0.1 - (ratio * 0.08)  # Fade from 0.1 to 0.02
-            color = colors.Color(30/255.0, 58/255.0, 138/255.0, alpha=alpha)  # primary color
-            canvas.setFillColor(color)
-            rect_height = header_height / float(gradient_steps)
-            canvas.rect(0, doc.pagesize[1] - header_height + (i * rect_height), 
-                       page_width, rect_height, fill=1, stroke=0)
-        
-        # Header line accent
-        canvas.setStrokeColor(self.colors['primary'])
-        canvas.setLineWidth(3)
-        canvas.line(0, doc.pagesize[1] - header_height, page_width, doc.pagesize[1] - header_height)
-        
-        # Logo area (if available)
-        logo_path = 'assets/logo.png'
-        logo_x = 40
-        logo_y = doc.pagesize[1] - header_height + 20
-        
-        try:
-            if os.path.exists(logo_path):
-                canvas.drawImage(logo_path, logo_x, logo_y, 
-                               width=40, height=40, 
-                               preserveAspectRatio=True, mask='auto')
-            else:
-                raise FileNotFoundError("Logo not found")
-        except Exception:
-            # Create a premium logo placeholder
-            canvas.setFillColor(self.colors['primary'])
-            canvas.circle(logo_x + 20, logo_y + 20, 20, fill=1, stroke=0)
-            canvas.setFillColor(self.colors['white'])
-            canvas.setFont(self.font_display, 16)
-            canvas.drawCentredString(logo_x + 20, logo_y + 14, "AI")
-        
-        # Header text - professional sizing
-        canvas.setFont(self.font_display, 14)
-        canvas.setFillColor(self.colors['primary_dark'])
-        canvas.drawString(logo_x + 60, logo_y + 25, "EXPERIMENTAL RESEARCH PROTOTYPE")
-        
+        canvas.setFillColor(c["primary"])
+        canvas.rect(0, page_height - 5, page_width, 5, stroke=0, fill=1)
+
+        baseline = page_height - 30
+        canvas.setFont(self.font_display, 10.5)
+        canvas.setFillColor(c["ink"])
+        canvas.drawString(MARGIN, baseline, "MedGemma")
+        brand_width = pdfmetrics.stringWidth("MedGemma", self.font_display, 10.5)
         canvas.setFont(self.font_body, 10)
-        canvas.setFillColor(self.colors['gray_600'])
-        canvas.drawString(logo_x + 60, logo_y + 8, "Experimental model output • Research use only")
-        
-        # Header decoration
-        canvas.setStrokeColor(self.colors['accent_cyan'])
-        canvas.setLineWidth(2)
-        canvas.line(logo_x + 60, logo_y + 4, logo_x + 300, logo_y + 4)
-        
+        canvas.setFillColor(c["gray_500"])
+        canvas.drawString(MARGIN + brand_width + 6, baseline, "Research prototype")
+
+        pill = "RESEARCH USE ONLY · NOT FOR CLINICAL USE"
+        pill_width = pdfmetrics.stringWidth(pill, self.font_body_bold, 7) + 16
+        pill_x = page_width - MARGIN - pill_width
+        canvas.setFillColor(c["amber_50"])
+        canvas.setStrokeColor(c["amber_500"])
+        canvas.setLineWidth(0.75)
+        canvas.roundRect(pill_x, baseline - 4, pill_width, 15, 7.5, stroke=1, fill=1)
+        canvas.setFont(self.font_body_bold, 7)
+        canvas.setFillColor(c["amber_800"])
+        canvas.drawString(pill_x + 8, baseline + 0.8, pill)
+
+        canvas.setStrokeColor(c["gray_200"])
+        canvas.setLineWidth(0.75)
+        canvas.line(MARGIN, page_height - 44, page_width - MARGIN, page_height - 44)
+        canvas.line(MARGIN, 44, page_width - MARGIN, 44)
+        canvas.setFont(self.font_body, 7.5)
+        canvas.setFillColor(c["gray_500"])
+        canvas.drawString(MARGIN, 31, "Experimental model output · Research use only · "
+                                      "Not validated for patient care")
+        if analysis_id:
+            canvas.drawString(MARGIN, 21, f"Analysis {analysis_id}")
         canvas.restoreState()
 
-    def _create_footer_canvas(self, canvas, doc):
-        """Create professional footer"""
-        canvas.saveState()
-        
-        footer_y = 30
-        page_width = doc.pagesize[0]
-        
-        # Footer background
-        canvas.setFillColor(self.colors['gray_50'])
-        canvas.rect(0, 0, page_width, 60, fill=1, stroke=0)
-        
-        # Footer line
-        canvas.setStrokeColor(self.colors['gray_300'])
-        canvas.setLineWidth(1)
-        canvas.line(40, 60, page_width - 40, 60)
-        
-        # Footer text
-        canvas.setFont(self.font_body, 9)
-        canvas.setFillColor(self.colors['gray_500'])
-        canvas.drawString(40, footer_y + 20, "Experimental research prototype")
-        canvas.drawString(40, footer_y + 8, "Research use only • Not for clinical use")
-        
-        # Page number with style
-        canvas.setFont(self.font_body_bold, 10)
-        canvas.setFillColor(self.colors['primary'])
-        canvas.drawRightString(page_width - 40, footer_y + 14, f"Page {doc.page}")
-        
-        # Security indicator
-        canvas.setFont(self.font_body, 8)
-        canvas.setFillColor(self.colors['gray_400'])
-        canvas.drawRightString(page_width - 40, footer_y + 2, "Not validated for patient care")
-        
-        canvas.restoreState()
+    # --- building blocks ------------------------------------------------------------------
 
-    def _create_premium_stat_card(self, value, label, status_color='primary', icon="📊"):
-        """Create ultra-premium stat cards with visual hierarchy"""
-        if status_color == 'success':
-            bg_color = self.colors['success_ultra_light']
-            border_color = self.colors['success']
-            value_color = self.colors['success_dark']
-        elif status_color == 'warning':
-            bg_color = self.colors['warning_ultra_light']
-            border_color = self.colors['warning']
-            value_color = self.colors['warning_dark']
-        elif status_color == 'danger':
-            bg_color = self.colors['danger_ultra_light']
-            border_color = self.colors['danger']
-            value_color = self.colors['danger_dark']
-        else:  # primary
-            bg_color = self.colors['primary_ultra_light']
-            border_color = self.colors['primary']
-            value_color = self.colors['primary_dark']
-        
-        value_style = ParagraphStyle(
-            'CardValue', 
-            parent=self.styles['stat_value'], 
-            textColor=value_color, 
-            fontSize=13, 
-            leading=16, 
-            wordWrap='CJK',
-            alignment=TA_CENTER
-        )
-        label_style = ParagraphStyle(
-            'CardLabel', parent=self.styles['stat_label'], textColor=self.colors['gray_600'], fontSize=10, leading=14, wordWrap='CJK'
-        )
-        
-        card_content = [
-            [Paragraph(f"{icon}", ParagraphStyle('Icon', fontSize=16, alignment=TA_CENTER, spaceAfter=6))],
-            [Paragraph(escape(str(value).replace('\n', ' ').strip()), value_style)],
-            [Paragraph(label, label_style)]
+    def _label(self, text: str) -> Paragraph:
+        return Paragraph(escape(text.upper()), self.styles["label"])
+
+    def _section(self, title: str, flowables: list, intro: Optional[str] = None) -> KeepTogether:
+        """Keep a heading, its rule and its content on the same page."""
+        items = [Paragraph(escape(title), self.styles["section"]),
+                 HRFlowable(width="100%", thickness=0.6, color=self.colors["gray_200"],
+                            spaceBefore=3, spaceAfter=5)]
+        if intro:
+            items.append(Paragraph(intro, self.styles["intro"]))
+        return KeepTogether(items + flowables)
+
+    @staticmethod
+    def _fit_image(image: Image.Image, max_width: float, max_height: float) -> ReportLabImage:
+        """Embed a downscaled copy, sized to fit the box while keeping its aspect ratio."""
+        preview = image.convert("RGB")
+        preview.thumbnail((PREVIEW_MAX_SIDE, PREVIEW_MAX_SIDE))
+        buffer = io.BytesIO()
+        preview.save(buffer, format="PNG", optimize=True)
+        buffer.seek(0)
+        scale = min(max_width / image.width, max_height / image.height)
+        return ReportLabImage(buffer, width=image.width * scale, height=image.height * scale)
+
+    def _key_value_table(self, rows: list[tuple[str, str]], width: float,
+                         label_width: float = 110, padding: float = 4) -> Table:
+        data = [[Paragraph(escape(label), self.styles["cell_label"]),
+                 Paragraph(escape(value).replace("\n", "<br/>"), self.styles["cell"])]
+                for label, value in rows]
+        table = Table(data, colWidths=[label_width, width - label_width])
+        table.setStyle(self._grid_style(padding=padding))
+        return table
+
+    def _grid_style(self, extra: Optional[list] = None, padding: float = 4) -> TableStyle:
+        return TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BACKGROUND", (0, 0), (-1, -1), self.colors["gray_50"]),
+            ("LINEBELOW", (0, 0), (-1, -2), 0.5, self.colors["gray_200"]),
+            ("BOX", (0, 0), (-1, -1), 0.5, self.colors["gray_200"]),
+            ("TOPPADDING", (0, 0), (-1, -1), padding),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), padding),
+            ("LEFTPADDING", (0, 0), (-1, -1), 7),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+            *(extra or []),
+        ])
+
+    def _meta_strip(self, response, width: float) -> Table:
+        meta = response.image_metadata or {}
+        info = response.model_info or {}
+        source = str(meta.get("filename") or meta.get("url") or meta.get("source") or NOT_RECORDED)
+        dimensions = meta.get("dimensions")
+        image_sub = (f"{dimensions[0]} × {dimensions[1]} px"
+                     if isinstance(dimensions, (list, tuple)) and len(dimensions) == 2 else None)
+        precision = info.get("precision") or ""
+        runtime = [("4-bit NF4" if "4-bit" in precision else precision),
+                   str(info.get("device") or "").split(" ")[0]]
+        analysis_id = response.analysis_id
+        short_id = analysis_id if len(analysis_id) <= 13 else analysis_id[:8]
+        cells = [
+            ("Analysis ID", short_id, "Full ID in footer" if short_id != analysis_id else None),
+            ("Generated", _format_timestamp(response.timestamp, compact=True), None),
+            ("Image", _truncate(source.rsplit("/", 1)[-1], 28), image_sub),
+            ("Model", _truncate(str(info.get("model_id") or NOT_RECORDED).split("/")[-1], 26),
+             " · ".join(part for part in runtime if part) or None),
         ]
-        
-        card_table = Table(card_content, colWidths=[2.6 * inch])
-        card_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), bg_color),
-            ('BOX', (0, 0), (-1, -1), 2, border_color),
-            ('TOPPADDING', (0, 0), (-1, -1), 18),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 18),
-            ('LEFTPADDING', (0, 0), (-1, -1), 10),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 10),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
+        row = []
+        for label, value, sub in cells:
+            cell = [self._label(label), Spacer(1, 2),
+                    Paragraph(escape(value), self.styles["meta_value"])]
+            if sub:
+                cell.append(Paragraph(escape(sub), self.styles["meta_sub"]))
+            row.append(cell)
+        table = Table([row], colWidths=[width / 4] * 4)
+        table.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BACKGROUND", (0, 0), (-1, -1), self.colors["gray_50"]),
+            ("BOX", (0, 0), (-1, -1), 0.5, self.colors["gray_200"]),
+            ("LINEBEFORE", (1, 0), (-1, -1), 0.5, self.colors["gray_200"]),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ("LEFTPADDING", (0, 0), (-1, -1), 9),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
         ]))
-        
-        return card_table
+        return table
 
-    def _create_metadata_section(self, analysis_response):
-        """Create beautiful metadata section"""
-        metadata = analysis_response.image_metadata
-        source = metadata.get('filename') or str(metadata.get('url', 'Unknown'))
-        if len(source) > 55:
-            source = source[:52] + '...'
-        
-        try:
-            timestamp = datetime.fromisoformat(analysis_response.timestamp.replace('Z', '+00:00'))
-            time_str = timestamp.strftime('%B %d, %Y at %H:%M:%S UTC')
-        except Exception:
-            time_str = analysis_response.timestamp
-        
-        dimensions = metadata.get('dimensions', ['N/A', 'N/A'])
-        
-        metadata_items = [
-            ('🆔', 'Analysis ID', analysis_response.analysis_id),
-            ('⏰', 'Generated', time_str),
-            ('📁', 'Image Source', source),
-            ('📐', 'Dimensions', f"{dimensions[0]} × {dimensions[1]} pixels"),
-            ('💾', 'Processing', "Neural Network Analysis Complete"),
-            ('🎯', 'Model Version', "MedGemma (configured model)")
+    def _response_rows(self, response) -> list[tuple[str, str]]:
+        sections = split_response(response.raw_response)
+        finding = sections["finding"]
+        # The banner already shows the parsed result; repeat the model's wording only if it differs.
+        if finding and finding.lower().rstrip(". ") == response.findings.impression.lower():
+            finding = None
+        rows = [(label, value) for label, value in (("Finding", finding),
+                                                    ("Reasoning", sections["reasoning"])) if value]
+        if not rows:
+            rows = [("Response", clean_markdown(response.raw_response) or "No text returned")]
+        return rows
+
+    def _response_is_long(self, response) -> bool:
+        return any(len(value) > REASONING_PREVIEW_CHARS
+                   for _, value in self._response_rows(response))
+
+    def _finding_column(self, response, text_color) -> list:
+        outcome_style = ParagraphStyle("OutcomeTone", parent=self.styles["outcome"],
+                                       textColor=text_color)
+        items = [self._label("Model finding"), Spacer(1, 4),
+                 Paragraph(escape(_sentence_case(response.findings.impression)), outcome_style),
+                 Spacer(1, 7)]
+        rows = self._response_rows(response)
+        prefixes = {"Finding": "Model wording", "Response": "Model response"}
+        if len(rows) > 1:
+            prefixes["Reasoning"] = "Reasoning"
+        for label, value in rows:
+            text, _ = _preview(value, REASONING_PREVIEW_CHARS)
+            prefix = prefixes.get(label)
+            markup = escape(text) if prefix is None else f"<b>{prefix}:</b> {escape(text)}"
+            items.append(Paragraph(markup, self.styles["body"]))
+        if self._response_is_long(response):
+            items.append(Paragraph("Shortened here; see ‘Full model response’ later in this "
+                                   "report.", self.styles["note"]))
+        return items
+
+    def _score_column(self, response, attribution: Optional[AttributionMap], width: float) -> list:
+        items = [self._label("Decision score · logit difference"), Spacer(1, 3)]
+        if attribution is None:
+            status = (response.attribution or {}).get("status")
+            reason = {
+                "disabled": "Attribution is disabled on this server (MEDGEMMA_ATTRIBUTION=0).",
+                "unavailable": "The attribution pass failed for this analysis.",
+            }.get(status, "No attribution pass was recorded for this analysis.")
+            return items + [Paragraph("Not available", self.styles["score"]),
+                            Paragraph(escape(reason), self.styles["note"]),
+                            Spacer(1, 8), self._label("Confidence"), Spacer(1, 2),
+                            Paragraph("Not available (uncalibrated)", self.styles["body_small"])]
+
+        score = attribution.target_score
+        leaning = ("favours pneumothorax" if score > 0 else
+                   "favours no pneumothorax" if score < 0 else "no preference")
+        gray = HEX["gray_500"]
+        items += [
+            Paragraph(f"{format_signed(score)}"
+                      f"<font name='{self.font_body}' size='8.5' color='{gray}'>"
+                      f"&nbsp;&nbsp;{escape(leaning)}</font>",
+                      self.styles["score"]),
+            Spacer(1, 5),
+            DecisionGauge(score, width, self.fonts),
+            Spacer(1, 4),
         ]
-        
-        styled_rows = []
-        for icon, label, value in metadata_items:
-            row = [
-                Paragraph(icon, ParagraphStyle('Icon', fontSize=12, alignment=TA_CENTER)),
-                Paragraph(label, self.styles['meta_label']),
-                Paragraph(escape(str(value)), self.styles['meta_value'])
-            ]
-            styled_rows.append(row)
-        
-        meta_table = Table(styled_rows, colWidths=[0.3*inch, 1.2*inch, None])
-        meta_table.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('PADDING', (0, 0), (-1, -1), 8),
-            ('LEFTPADDING', (0, 0), (0, -1), 4),
-            ('RIGHTPADDING', (-1, 0), (-1, -1), 4),
-            ('LINEBELOW', (0, 0), (-1, -2), 0.5, self.colors['gray_200']),
-            ('BACKGROUND', (0, 0), (-1, -1), self.colors['gray_50']),
-            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [6, 6, 6, 6]),
+        tone, sentence = score_agreement(response.findings.impression, score)
+        tone_color = {"success": HEX["success_text"], "danger": HEX["danger_text"]}.get(
+            tone, HEX["gray_600"])
+        items.append(Paragraph(f"<font color='{tone_color}'>{escape(sentence)}</font>",
+                               self.styles["body_small"]))
+        preference = answer_preference(score)
+        items.append(Paragraph(
+            f"Token preference: pneumothorax {format_percent(preference)}, no pneumothorax "
+            f"{format_percent(1 - preference)} (uncalibrated; not the probability of disease).",
+            self.styles["note"]))
+        return items
+
+    def _result_panel(self, response, attribution: Optional[AttributionMap], width: float) -> Table:
+        background, accent, text_color = OUTCOME_TONES[outcome_tone(response.findings.impression)]
+        left_width = width * 0.53
+        padding = 14
+        right_width = width - left_width
+        table = Table([[self._finding_column(response, text_color),
+                        self._score_column(response, attribution, right_width - 2 * padding)]],
+                      colWidths=[left_width, right_width])
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (0, 0), background),
+            ("BACKGROUND", (1, 0), (1, 0), self.colors["white"]),
+            ("LINEBEFORE", (0, 0), (0, 0), 4, accent),
+            ("BOX", (0, 0), (-1, -1), 0.5, self.colors["gray_200"]),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), padding),
+            ("RIGHTPADDING", (0, 0), (-1, -1), padding),
+            ("TOPPADDING", (0, 0), (-1, -1), 12),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
         ]))
-        
-        return meta_table
+        return table
 
-    def _enhance_image_with_border(self, pil_image, border_color="#E5E7EB", border_width=2):
-        """Add professional border to images"""
-        border_rgb = tuple(int(border_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
-        
-        new_width = pil_image.width + (border_width * 2)
-        new_height = pil_image.height + (border_width * 2)
-        bordered_image = Image.new('RGB', (new_width, new_height), border_rgb)
-        bordered_image.paste(pil_image, (border_width, border_width))
-        
-        return bordered_image
+    def _figure(self, image: Image.Image, attribution: Optional[AttributionMap],
+                width: float) -> list:
+        max_height = 236
+        if attribution is None:
+            # The decision-score panel already says why there is no map.
+            single = Table([[self._fit_image(image, width * 0.55, max_height)]], colWidths=[width])
+            single.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER")]))
+            return [single]
 
-    def _pil_to_reportlab_image(self, pil_image, max_width=None, max_height=None, enhance=True):
-        """Convert PIL image to ReportLab with enhancements"""
-        if pil_image.mode != 'RGB':
-            pil_image = pil_image.convert('RGB')
-        
-        if enhance:
-            pil_image = self._enhance_image_with_border(pil_image)
-        
-        pil_image = pil_image.filter(ImageFilter.UnsharpMask(radius=1, percent=110, threshold=3))
-        
-        img_buffer = io.BytesIO()
-        pil_image.save(img_buffer, format='PNG', optimize=True, quality=95)
-        img_buffer.seek(0)
-        
-        original_width, original_height = pil_image.size
-        aspect_ratio = float(original_height) / float(original_width)
-        
-        width = max_width if max_width else original_width
-        height = width * aspect_ratio
+        gap = 16
+        panel = (width - gap) / 2
+        overlay = self._fit_image(render_overlay(image, attribution.grid), panel, max_height)
+        rows = [
+            [self._fit_image(image, panel, max_height), overlay],
+            [Paragraph("Input image", self.styles["caption"]),
+             Paragraph("Attribution overlay", self.styles["caption"])],
+            ["", OverlayLegend(max(overlay.drawWidth, 200), self.fonts)],
+        ]
+        grid = Table(rows, colWidths=[width / 2, width / 2])
+        grid.setStyle(TableStyle([
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, 0), "BOTTOM"),
+            ("TOPPADDING", (0, 1), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        rows_count, columns_count = attribution.grid.shape
+        if attribution.is_empty:
+            note = ("Every image token contributed zero to the score, so the overlay is blank "
+                    "and there is no regional breakdown.")
+        else:
+            note = (f"Red areas raised the score for {POSITIVE_LABEL}; blue areas raised "
+                    f"{NEGATIVE_LABEL}. Colour strength is relative to the strongest token in "
+                    f"this image. {rows_count} × {columns_count} token resolution, smoothed for "
+                    "display (the unsmoothed grid follows). Not a lesion outline or a validated "
+                    "localization.")
+        return [grid, Paragraph(note, self.styles["note"])]
 
-        return ReportLabImage(img_buffer, width=width, height=height)
+    def _stat_tiles(self, tiles: list[tuple[str, str, str]], width: float) -> Table:
+        row = [[Paragraph(label, self.styles["label"]), Spacer(1, 3),
+                Paragraph(escape(value), self.styles["tile_value"]),
+                Paragraph(escape(sub), self.styles["tile_sub"])] for label, value, sub in tiles]
+        table = Table([row], colWidths=[width / len(tiles)] * len(tiles))
+        table.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BOX", (0, 0), (-1, -1), 0.5, self.colors["gray_200"]),
+            ("LINEBEFORE", (1, 0), (-1, -1), 0.5, self.colors["gray_200"]),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 9),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        return table
 
-    def generate_pdf_report(self,
-                            analysis_response,
-                            original_image: Image.Image) -> str:
+    def _region_section(self, image: Image.Image, attribution: AttributionMap,
+                        summary: EvidenceSummary, width: float) -> list:
+        map_width, map_height, caption_height = 142, 164, 13
+        token_image = self._fit_image(render_token_grid(image, attribution.grid),
+                                      map_width, map_height)
+        column = map_width + 18
+        chart = RegionChart(summary.regions, width - column - 8,
+                            token_image.drawHeight + caption_height, self.fonts)
+        layout = Table(
+            [[[token_image, Spacer(1, 3),
+               Paragraph("Token grid, unsmoothed", self.styles["caption"])], chart]],
+            colWidths=[column, width - column])
+        layout.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ALIGN", (0, 0), (0, 0), "LEFT"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        swatch = "<font size='9' color='{}'>■</font>&nbsp;{}"
+        tiles = self._stat_tiles([
+            (swatch.format(HEX["toward"], "TOWARD PNEUMOTHORAX"),
+             format_percent(summary.toward_share), "of the total attribution"),
+            (swatch.format(HEX["against"], "TOWARD NO PNEUMOTHORAX"),
+             format_percent(summary.against_share), "of the total attribution"),
+            (f"STRONGEST {summary.top_token_count} TOKENS",
+             format_percent(summary.top_token_share),
+             "an even spread would give "
+             f"{format_percent(summary.top_token_count / summary.token_count)}"),
+            ("OUTER RING OF TOKENS", format_percent(summary.border_share),
+             f"the ring covers {format_percent(summary.border_area)} of the image"),
+        ], width)
+        items = [layout, Spacer(1, 8), tiles]
+        note = border_note(summary)
+        if note:
+            items.append(Paragraph("<b>Note:</b> " + escape(note), self.styles["note"]))
+        return items
+
+    def _image_check_rows(self, response) -> list[tuple[str, str]]:
+        check = (response.image_metadata or {}).get("image_check")
+        if not isinstance(check, dict) or "mean_intensity" not in check:
+            return [("Image check", NOT_RECORDED)]
+        rows = [
+            ("Colour", "Grayscale" if check.get("grayscale") else "Colour (channels differ)"),
+            ("Mean intensity", f"{check['mean_intensity']:.0f} / 255"),
+            ("Contrast (SD)", f"{check.get('contrast_sd', 0):.0f}"),
+            ("1st–99th percentile",
+             f"{check.get('intensity_p1')}–{check.get('intensity_p99')} (shaded)"),
+        ]
+        if "black_pixel_pct" in check:
+            rows.append(("Pure black / white", f"{check['black_pixel_pct']:.1f}% / "
+                                               f"{check.get('white_pixel_pct', 0):.1f}%"))
+        rows.append(("Flags", " ".join(image_check_flags(check)) or "None"))
+        return rows
+
+    def _image_check_section(self, response, image: Image.Image, width: float) -> list:
+        check = (response.image_metadata or {}).get("image_check")
+        check = check if isinstance(check, dict) else {}
+        histogram_width = width * 0.48
+        histogram = IntensityHistogram(intensity_histogram(image), histogram_width - 14, 66,
+                                       self.fonts, check.get("intensity_p1"),
+                                       check.get("intensity_p99"))
+        table_width = width - histogram_width
+        layout = Table(
+            [[[histogram, Spacer(1, 3),
+               Paragraph("Pixel intensity distribution", self.styles["caption"])],
+              self._key_value_table(self._image_check_rows(response), table_width, 96, 2.5)]],
+            colWidths=[histogram_width, table_width])
+        layout.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        return [layout]
+
+    def _detail_rows(self, response) -> list[tuple[str, str]]:
+        meta = response.image_metadata or {}
+        info = response.model_info or {}
+        timings = response.timings or {}
+        attribution = response.attribution or {}
+
+        source = meta.get("filename") or meta.get("url") or meta.get("source")
+        image_parts = [_truncate(str(source), 48)] if source else []
+        dimensions = meta.get("dimensions")
+        if isinstance(dimensions, (list, tuple)) and len(dimensions) == 2:
+            image_parts.append(f"{dimensions[0]} × {dimensions[1]} px")
+        if meta.get("format"):
+            image_parts.append(str(meta["format"]))
+        if _format_bytes(meta.get("size")):
+            image_parts.append(_format_bytes(meta.get("size")))
+
+        runtime = " on ".join(part for part in (info.get("precision"), info.get("device")) if part)
+
+        timing_parts = []
+        if "generation_seconds" in timings:
+            timing_parts.append(f"generation {timings['generation_seconds']:.2f} s")
+        if "attribution_seconds" in timings:
+            timing_parts.append(f"attribution {timings['attribution_seconds']:.2f} s")
+
+        status = attribution.get("status")
+        if status == "available":
+            score = format_signed(attribution.get("target_score", 0), 3)
+            attribution_text = (f"{attribution.get('method', 'Gradient × activation')} · "
+                                f"target score {score} (uncalibrated)")
+        elif status == "disabled":
+            attribution_text = "Disabled"
+        elif status == "unavailable":
+            attribution_text = "Could not be computed for this analysis"
+        else:
+            attribution_text = NOT_RECORDED
+
+        software_parts = [f"{name} {info[key]}" for key, name in
+                          (("app_version", "app"), ("torch", "torch"),
+                           ("transformers", "transformers")) if info.get(key)]
+
+        return [
+            ("Analysis ID", response.analysis_id),
+            ("Generated", _format_timestamp(response.timestamp)),
+            ("Image", " · ".join(image_parts) or NOT_RECORDED),
+            ("Timing", " · ".join(timing_parts) or NOT_RECORDED),
+            ("Model", info.get("model_id") or NOT_RECORDED),
+            ("Precision and device", runtime or NOT_RECORDED),
+            ("Software", " · ".join(software_parts) or NOT_RECORDED),
+            ("Attribution", attribution_text),
+        ]
+
+    def _detail_grid(self, rows: list[tuple[str, str]], width: float) -> Table:
+        """Two label/value columns side by side, filled top to bottom."""
+        half = (len(rows) + 1) // 2
+        left, right = rows[:half], rows[half:]
+        label_width, column = 90, width / 2
+
+        def cells(pair):
+            if pair is None:
+                return ["", ""]
+            label, value = pair
+            return [Paragraph(escape(label), self.styles["cell_label"]),
+                    Paragraph(escape(value), self.styles["cell"])]
+
+        data = [cells(left[index]) + cells(right[index] if index < len(right) else None)
+                for index in range(half)]
+        table = Table(data, colWidths=[label_width, column - label_width,
+                                       label_width, column - label_width])
+        table.setStyle(self._grid_style([("LINEBEFORE", (2, 0), (2, -1), 0.5,
+                                          self.colors["gray_200"])]))
+        return table
+
+    def _method(self, attribution: AttributionMap) -> Paragraph:
+        rows, columns = attribution.grid.shape
+        return Paragraph(
+            f"Gradient × activation on the {rows * columns} image tokens ({rows} × {columns}) "
+            f"that MedGemma's language model receives, taken at the token where "
+            f"{POSITIVE_LABEL} and {NEGATIVE_LABEL} first differ. The decision score is the "
+            "logit difference between those two tokens; positive favours pneumothorax. Regions "
+            "are thirds and halves of the image frame, not anatomical zones. Image left is "
+            "usually the patient's right on a PA view, but orientation is not checked.",
+            self.styles["cell"])
+
+    def _limitations(self, width: float) -> Table:
+        box = Table([[Paragraph(LIMITATIONS, self.styles["note"])]], colWidths=[width])
+        box.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), self.colors["amber_50"]),
+            ("BOX", (0, 0), (-1, -1), 0.75, self.colors["amber_500"]),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        return box
+
+    # --- public API -----------------------------------------------------------------------
+
+    def generate_pdf_report(self, analysis_response, original_image: Image.Image,
+                            attribution: Optional[AttributionMap] = None) -> str:
         """Build a research PDF and publish it only after rendering succeeds."""
         destination = report_path(self.reports_dir, analysis_response.analysis_id)
         with atomic_report(destination) as temporary:
-            self._build_pdf_report(analysis_response, original_image, temporary)
+            self._build_pdf_report(analysis_response, original_image, attribution, temporary)
         logger.info("Successfully generated experimental PDF report")
         return str(destination)
 
-    def _build_pdf_report(self, analysis_response, original_image: Image.Image,
-                          filepath: str) -> None:
+    def _story(self, response, image: Image.Image, attribution: Optional[AttributionMap],
+               width: float) -> list:
+        summary = summarize_evidence(attribution.grid) if attribution is not None else None
+        story = [
+            Paragraph("Pneumothorax Research Report", self.styles["title"]),
+            Paragraph("Single chest X-ray analysed by an experimental MedGemma pipeline. "
+                      "For research only; not for clinical use.", self.styles["subtitle"]),
+            self._meta_strip(response, width),
+            Spacer(1, 10),
+            self._result_panel(response, attribution, width),
+            self._section("Attribution map" if attribution is not None else "Input image",
+                          self._figure(image, attribution, width)),
+            Spacer(1, 10),
+            self._limitations(width),
+        ]
+        if summary is not None:
+            story.append(self._section(
+                "Attribution by region",
+                self._region_section(image, attribution, summary, width),
+                escape(region_headline(summary))
+                + " Bars show each region's share; all twelve sum to 100%."))
+        story.append(self._section(
+            "Input image check", self._image_check_section(response, image, width),
+            "Descriptive statistics of the uploaded file. They are not a diagnostic quality "
+            "assessment."))
+        if self._response_is_long(response):
+            text = clean_markdown(response.raw_response) or "No text returned"
+            story.append(self._section("Full model response", [
+                Paragraph(escape(text).replace("\n", "<br/>"), self.styles["body_small"])]))
+        story.append(self._section("Technical details",
+                                   [self._detail_grid(self._detail_rows(response), width)]))
+        if attribution is not None:
+            story.append(self._section("Method", [self._method(attribution)]))
+        return story
+
+    def _build_pdf_report(self, response, original_image: Image.Image,
+                          attribution: Optional[AttributionMap], filepath: str) -> None:
         """Render the document to a private temporary path before publication."""
         doc = SimpleDocTemplate(
-            filepath,
-            pagesize=letter,
-            rightMargin=40, leftMargin=40,
-            topMargin=100, bottomMargin=80
+            filepath, pagesize=letter, rightMargin=MARGIN, leftMargin=MARGIN, topMargin=58,
+            bottomMargin=56, title="Pneumothorax research report",
+            author="MedGemma research prototype", subject="Experimental model output",
         )
-        
-        story = []
-        findings = analysis_response.findings
-        
-        # === COVER PAGE ===
-        story.append(Spacer(1, 25))
-        story.append(Paragraph("PNEUMOTHORAX", self.styles['hero_title']))
-        story.append(Paragraph("EXPERIMENTAL RESEARCH REPORT", self.styles['main_title']))
-        story.append(Spacer(1, 12))
-        
-        story.append(Paragraph(
-            "Experimental model output for research only. Not for clinical use.",
-            self.styles['subtitle']
-        ))
-        
-        story.append(Spacer(1, 35))
-        
-        impression_icon = "📊"
-        confidence_icon = "🎯"
-        
-        impression_color = 'warning'
-        confidence_color = 'success' if 'HIGH' in findings.confidence_level.upper() else 'warning'
-        
-        stat_cards = [
-            self._create_premium_stat_card(
-                findings.impression.title().replace('_', ' '), 
-                "Model Output",
-                impression_color, 
-                impression_icon
-            ),
-            self._create_premium_stat_card(
-                findings.confidence_level.title(), 
-                "Confidence",
-                confidence_color, 
-                confidence_icon
-            )
-        ]
-        
-        cards_table = Table([stat_cards], colWidths=[2.6*inch, 2.6*inch], hAlign='CENTER')
-        cards_table.setStyle(TableStyle([
-            ('LEFTPADDING', (0, 0), (0, 0), 6), ('RIGHTPADDING', (0, 0), (0, 0), 3),
-            ('LEFTPADDING', (1, 0), (1, 0), 3), ('RIGHTPADDING', (1, 0), (1, 0), 6),
-        ]))
-        
-        story.append(cards_table)
-        story.append(Spacer(1, 40))
-        
-        story.append(Paragraph("📋 Analysis Metadata", self.styles['section_header']))
-        story.append(self._create_metadata_section(analysis_response))
-        story.append(Spacer(1, 35))
-        
-        story.append(Paragraph("🧠 AI Analysis Output", self.styles['section_header']))
-        analysis_text = escape(analysis_response.raw_response).replace('\n\n', '<br/><br/>').replace('\n', ' ')
-        
-        analysis_table = Table([[Paragraph(analysis_text, self.styles['body'])]], colWidths=[6.5*inch])
-        analysis_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), self.colors['gray_50']),
-            ('BOX', (0, 0), (-1, -1), 1, self.colors['primary_light']),
-            ('PADDING', (0, 0), (-1, -1), 18),
-            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
-        ]))
-        
-        story.append(analysis_table)
-        story.append(Spacer(1, 35))
-        
-        story.append(Paragraph("⚖️ Medical & Legal Disclaimer", self.styles['section_header']))
-        disclaimer_content = """<b>EXPERIMENTAL RESEARCH ONLY.</b> This output is not validated for diagnosis, clinical decisions, or patient care. Model findings may be incorrect or incomplete. Do not use real patient data without appropriate safeguards."""
-
-        disclaimer_table = Table([[Paragraph(disclaimer_content, self.styles['disclaimer'])]], colWidths=[6.5*inch])
-        disclaimer_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), self.colors['warning_ultra_light']),
-            ('BOX', (0, 0), (-1, -1), 1, self.colors['warning']),
-            ('PADDING', (0, 0), (-1, -1), 16),
-            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [8, 8, 8, 8]),
-        ]))
-        
-        story.append(disclaimer_table)
-        story.append(Spacer(1, 25))
-        
-        story.append(Paragraph("Input Image", self.styles['section_header']))
-        story.append(self._pil_to_reportlab_image(original_image, max_width=3 * inch))
-        story.append(Spacer(1, 25))
-
-        # === DETAILED FINDINGS SECTION ===
-        story.append(Paragraph("🔬 Detailed Technical Findings", self.styles['section_header']))
-        
-        detailed_findings_data = [
-            [Paragraph("<b>Medical Finding</b>", self.styles['table_header']), 
-             Paragraph("<b>Detection Status</b>", self.styles['table_header']), 
-             Paragraph("<b>Model Output Details</b>", self.styles['table_header'])]
-        ]
-        
-        finding_name = findings.impression
-        status_p = Paragraph(escape(findings.impression.upper()), self.styles['finding_status'])
-        details_text = "<br/>".join(escape(item) for item in findings.abnormalities)
-
-        finding_p = Paragraph(escape(finding_name), self.styles['body'])
-        details_p = Paragraph(details_text, self.styles['body'])
-        detailed_findings_data.append([finding_p, status_p, details_p])
-
-        findings_table = Table(detailed_findings_data, colWidths=[1.4*inch, 1.3*inch, 3.8*inch])
-        findings_table.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('GRID', (0, 0), (-1, -1), 0.5, self.colors['gray_300']),
-            ('BACKGROUND', (0, 0), (-1, 0), self.colors['primary_ultra_light']),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
-            ('TOPPADDING', (0, 0), (-1, -1), 12),
-            ('LEFTPADDING', (0, 0), (-1, -1), 12),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 12),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [self.colors['white'], self.colors['gray_50']]),
-        ]))
-        
-        story.append(findings_table)
-        story.append(Spacer(1, 25))
-
-        # === CLINICAL RECOMMENDATIONS ===
-        story.append(Paragraph("💡 Research Limitations", self.styles['section_header']))
-        
-        # Create a more compact recommendations section
-        recommendations_data = [
-            [Paragraph("<b>📋 Professional Review Required:</b> This prototype has not been validated for clinical decisions or patient care.", self.styles['body'])],
-            [Paragraph("<b>Model Limitations:</b> The model may produce incorrect or indeterminate findings.", self.styles['body'])],
-            [Paragraph("<b>Confidence:</b> No calibrated confidence score is available.", self.styles['body'])]
-        ]
-        
-        recommendations_table = Table(recommendations_data, colWidths=[6.5*inch])
-        recommendations_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), self.colors['primary_ultra_light']),
-            ('BOX', (0, 0), (-1, -1), 1, self.colors['primary_light']),
-            ('PADDING', (0, 0), (-1, -1), 14),
-            ('ROUNDEDCORNERS', (0, 0), (-1, -1), [6, 6, 6, 6]),
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ]))
-        
-        story.append(recommendations_table)
-
-        doc.build(story, onFirstPage=self._draw_page_template, onLaterPages=self._draw_page_template)
-        
-    def _draw_page_template(self, canvas, doc):
-        """Helper method to draw the header and footer on each page."""
-        self._create_header_canvas(canvas, doc)
-        self._create_footer_canvas(canvas, doc)
+        on_page = partial(self._draw_page_template, analysis_id=response.analysis_id)
+        doc.build(self._story(response, original_image, attribution, doc.width),
+                  onFirstPage=on_page, onLaterPages=on_page,
+                  canvasmaker=_numbered_canvas(self.font_body_bold, self.colors["primary"],
+                                               letter[0] - MARGIN, 26))

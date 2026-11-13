@@ -54,7 +54,13 @@ class AnalysisResponse(BaseModel):
     timestamp: str = Field(description="Analysis timestamp")
     findings: RadiologyFindings
     raw_response: str = Field(description="Raw AI model response")
-    image_metadata: Dict[str, Any] = Field(description="Image metadata")
+    image_metadata: Dict[str, Any] = Field(description="Image metadata and descriptive statistics")
+    model_info: Dict[str, Any] = Field(default_factory=dict,
+        description="Model ID, precision, device and software versions")
+    timings: Dict[str, float] = Field(default_factory=dict,
+        description="Wall-clock seconds for generation and attribution")
+    attribution: Dict[str, Any] = Field(default_factory=dict,
+        description="Attribution map status, method and uncalibrated target score")
 
 
 class PDFGenerationResponse(BaseModel):
